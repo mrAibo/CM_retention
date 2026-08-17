@@ -1,105 +1,154 @@
 # CM Retention
 
-`cm-retention` is a small, local command-line tool for administering retention and expiration policies in **IBM Content Manager Enterprise Edition 8.7**.
+`cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-It uses the native IBM Content Manager Java API already installed on the CM server. No REST service, application server, Python runtime, or additional third-party library is required.
-
-> **Status:** v0.1.2 · Java 8 · tested against IBM Content Manager 8.7
->
-> This is an independent administration utility, not an IBM product. IBM SDK libraries are **not** distributed in this repository.
+It intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, one launcher, no GUI, no external CLI framework and no additional runtime dependencies.
 
 ## What it does
 
-Read-only operations:
+- list retention policies and their assignments
+- inspect a policy in detail
+- list and inspect item types
+- create fixed-time `AUTO_DELETE` expiration policies
+- assign and unassign a policy to an item type
+- delete an unused policy
+- show environment/connection status
+- run local + IBM CM diagnostics with `doctor`
+- preview write operations with `--dry-run`
 
-```bash
-bin/cm-retention connection test
-bin/cm-retention itemtype list
-bin/cm-retention itemtype show <ITEMTYPE>
-bin/cm-retention policy list
-bin/cm-retention policy show <POLICY>
-bin/cm-retention policy usage <POLICY>
+It does **not** delete documents directly, run `deleteExpiredItems()`, backfill existing items, or modify IBM CM system tables.
+
+## v0.2 CLI
+
+```text
+cm-retention
+cm-retention status
+cm-retention policies
+cm-retention policy [POLICY]
+cm-retention itemtypes
+cm-retention itemtype [ITEMTYPE]
+cm-retention create [POLICY] [AGE]
+cm-retention assign [ITEMTYPE] [POLICY]
+cm-retention unassign [ITEMTYPE]
+cm-retention delete [POLICY]
+cm-retention doctor
 ```
 
-Controlled write operations:
+Run without arguments for the interactive admin mode:
 
-```bash
-bin/cm-retention policy create <POLICY> --expiration <AGE> [options] --yes
-bin/cm-retention policy delete <POLICY> --yes
-bin/cm-retention itemtype assign <ITEMTYPE> <POLICY> --yes
-bin/cm-retention itemtype unassign <ITEMTYPE> --yes
+```text
+CM Retention 0.2.0 | LSDB | icmadmin
+
+  1  Policies
+  2  Item types
+  3  Create policy
+  4  Assign policy
+  5  Unassign policy
+  6  Delete policy
+  7  Status
+  8  Doctor
+
+  q  Quit
 ```
 
-All write commands require `--yes`. The tool deliberately has no `--force` option for deleting a policy that is still assigned.
+This is intentionally not a full-screen TUI. It is only a small prompt layer over the same scriptable command core.
+
+## Quick examples
+
+List policies:
+
+```bash
+bin/cm-retention policies
+```
+
+Inspect one policy:
+
+```bash
+bin/cm-retention policy AUTO_DELETE_5Y
+```
+
+Create a five-year auto-delete policy using the safe defaults:
+
+```bash
+bin/cm-retention create AUTO_DELETE_5Y 5y
+```
+
+The default policy settings are:
+
+```text
+schedule       daily 02:00 (0 2 * * *)
+commit count   100
+max items      5000
+max duration   120 minutes
+force check-in false
+```
+
+Assign it:
+
+```bash
+bin/cm-retention assign INVOICE AUTO_DELETE_5Y
+```
+
+Preview the operation without changing IBM CM:
+
+```bash
+bin/cm-retention assign INVOICE AUTO_DELETE_5Y --dry-run
+```
+
+For non-interactive automation, `--yes` is required:
+
+```bash
+bin/cm-retention assign INVOICE AUTO_DELETE_5Y --yes
+```
+
+## Interactive vs. automation
+
+The CLI deliberately treats humans and scripts differently.
+
+**Interactive terminal**
+
+- missing item type / policy arguments are offered as a numbered selection
+- exact and unambiguous prefix matching is available while selecting
+- every real write prints its plan first
+- every write defaults to **No**: `[y/N]`
+
+**non-TTY / cron / pipeline**
+
+- all required identifiers must be supplied explicitly
+- identifiers must match exactly; no prefix matching is performed
+- real writes require `--yes`
+- `--dry-run` does not require `--yes`
+
+This prevents a cron job from waiting for input and keeps automation deterministic.
 
 ## Safety model
 
-`cm-retention` is intentionally narrow:
-
-- it does **not** delete repository documents directly;
-- it does **not** call `deleteExpiredItems()`;
-- it does **not** backfill expiration dates on existing documents;
-- it does **not** modify IBM CM system tables;
-- passwords are never accepted as command-line arguments;
-- `.env` must not be readable by group or other users;
-- itemtype assign/unassign operations reconnect and verify the persisted state after an IBM CM error.
-
-If IBM CM reports an error **after** the requested itemtype change was already persisted, the command exits with **code 6** instead of incorrectly reporting a clean success.
-
-## Retention vs. expiration
-
-The policy created by this tool is an expiration policy for automatic deletion:
+Every write follows the same model:
 
 ```text
-Type:               FIXED_TIME
-Retention enabled:  false
-Expiration enabled: true
-Expiration action:  AUTO_DELETE
+resolve -> read current state -> validate -> print plan
+        -> dry-run / confirm -> mutate -> commit -> verify persisted state
 ```
 
-This distinction matters:
+Important boundaries:
 
-- **Retention** protects an item from deletion for a minimum period.
-- **Expiration** determines when an item expires.
-- `AUTO_DELETE` instructs IBM CM to delete expired items through its background processing.
-- A policy with expiration enabled but action `NO_ACTION` does **not** automatically delete expired items.
+- policy assignment is idempotent: assigning the already active policy returns success with `No change`
+- unassigning an item type without a policy is also a successful no-op
+- an assigned policy cannot be deleted
+- existing documents are **not** retroactively backfilled when a policy is assigned
+- passwords are read from `.env` / environment, never from a command-line password option
+- unknown options are rejected instead of being silently ignored
+- after problematic IBM CM item-type updates the tool reconnects and verifies the actual persisted state
+- exit code `6` preserves the important distinction between a clean success and a persisted change followed by a secondary IBM CM error
+- the service re-checks the current assignment immediately before mutation and refuses stale plans
 
-Assigning a policy to an itemtype does not retroactively populate expiration dates for already existing documents. Existing content requires a separate, explicitly planned migration/backfill process if that is required by the business rule.
-
-## Requirements
-
-Typical installation paths:
-
-```text
-IBMCMROOT=/opt/IBM/db2cmv8
-JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
-```
-
-Required on the target host:
-
-- IBM Content Manager 8.7 client/server runtime
-- `${IBMCMROOT}/lib/cmbicmsdk81.jar`
-- IBM CM connection configuration containing the Library Server alias
-- Java 8 runtime and compiler
-- a CM user with the required administration permissions
-
-The tool is intended to run locally on a CM administration/server host as a normal administration account, not as `root`.
-
-## Installation
-
-Clone the repository:
-
-```bash
-git clone https://github.com/mrAibo/CM_retention.git
-cd CM_retention
-```
+## Configuration
 
 Create the local configuration:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
-vi .env
 ```
 
 Example:
@@ -107,180 +156,144 @@ Example:
 ```dotenv
 CM_DATABASE=LSDB
 CM_USER=icmadmin
-CM_PASSWORD=CHANGE_ME
+CM_PASSWORD=change-me
 IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ```
 
-Build and test:
+`.env` is ignored by Git and must not be committed.
 
-```bash
-./build.sh
-bin/cm-retention version
-bin/cm-retention connection test
-```
+### Test and production
 
-Optional installation into a dedicated directory:
-
-```bash
-./install.sh /home/ibmcmadm/cm-retention
-```
-
-## First safe test
-
-Start read-only:
-
-```bash
-bin/cm-retention connection test
-bin/cm-retention itemtype list
-bin/cm-retention policy list
-```
-
-Create a policy without assigning it:
-
-```bash
-bin/cm-retention policy create ZZ_AUTO_DELETE_1Y_TEST \
-  --expiration 1y \
-  --yes
-
-bin/cm-retention policy show ZZ_AUTO_DELETE_1Y_TEST
-bin/cm-retention policy usage ZZ_AUTO_DELETE_1Y_TEST
-```
-
-Remove it again:
-
-```bash
-bin/cm-retention policy delete ZZ_AUTO_DELETE_1Y_TEST --yes
-```
-
-Only after that should assignment be tested, preferably with a dedicated empty test itemtype:
-
-```bash
-bin/cm-retention itemtype assign TEST_ITEMTYPE ZZ_AUTO_DELETE_1Y_TEST --yes
-echo "RC=$?"
-
-bin/cm-retention itemtype show TEST_ITEMTYPE
-
-bin/cm-retention itemtype unassign TEST_ITEMTYPE --yes
-echo "RC=$?"
-```
-
-## Create options
-
-```text
---expiration 1y|12m|52w|365d   required
---schedule "0 2 * * *"         default: 0 2 * * *
---commit-count 100              default: 100
---max-items 5000                default: 5000; 0 = unlimited
---max-duration 120              default: 120 minutes
---force-checkin                 disabled by default
-```
+Treat environments as separate server configurations. Do not reuse one `.env` by editing it back and forth.
 
 Example:
 
-```bash
-bin/cm-retention policy create AUTO_DELETE_1Y \
-  --expiration 1y \
-  --schedule "0 2 * * *" \
-  --commit-count 100 \
-  --max-items 5000 \
-  --max-duration 120 \
-  --yes
+```text
+.env.test
+.env.prod
 ```
 
-The schedule string is passed to IBM CM as policy schedule information. `cm-retention` does not validate its semantics; verify the intended schedule in your CM environment before production use.
+```bash
+chmod 600 .env.test .env.prod
+
+bin/cm-retention --env .env.test status
+bin/cm-retention --env .env.prod status
+```
+
+A write can then be targeted explicitly:
+
+```bash
+bin/cm-retention --env .env.test assign AM AUTO_DELETE_1Y --dry-run
+```
+
+## Build
+
+Requirements:
+
+- IBM Content Manager 8.7 installed locally
+- Java 8 / `javac`
+- `${IBMCMROOT}/lib/cmbicmsdk81.jar`
+
+Build:
+
+```bash
+./build.sh
+```
+
+Output:
+
+```text
+build/cm-retention.jar
+```
+
+## Installer
+
+For an interactive first installation:
+
+```bash
+./install.sh
+```
+
+The installer prompts for IBM CM root, Java home, database, user and password, writes `.env` with mode `0600`, builds the tool and runs `status` as a connection test.
+
+The password is read with hidden terminal input and is not passed in argv.
+
+## Status and doctor
+
+Normal overview:
+
+```bash
+bin/cm-retention status
+```
+
+Deeper diagnostics:
+
+```bash
+bin/cm-retention doctor
+```
+
+`doctor` starts with launcher checks (configuration permissions, Java, IBM CM SDK, native library/config paths, application JAR) and then performs Java/IBM CM connection, policy-API and item-type-API checks.
+
+## Advanced create options
+
+The happy path is deliberately short:
+
+```bash
+bin/cm-retention create RET_10Y 10y
+```
+
+Only unusual environments normally need overrides:
+
+```bash
+bin/cm-retention create RET_10Y 10y \
+  --schedule "0 4 * * *" \
+  --commit-count 200 \
+  --max-items 10000 \
+  --max-duration 180
+```
+
+Show the complete create help:
+
+```bash
+bin/cm-retention create --help
+```
 
 ## Exit codes
 
 | Code | Meaning |
 |---:|---|
-| `0` | Success / requested state already present |
-| `2` | Invalid arguments, missing confirmation, or configuration error |
-| `3` | IBM CM API / Java / runtime error |
-| `4` | Itemtype or policy not found |
-| `5` | Unsafe or conflicting write operation |
-| `6` | Requested itemtype change persisted, but IBM CM reported a secondary error afterward |
+| `0` | success / no change / successful dry-run |
+| `2` | CLI, configuration, preflight or confirmation error |
+| `3` | IBM CM / runtime operation error |
+| `4` | requested item type or policy not found |
+| `5` | unsafe/conflicting operation, e.g. policy already exists, is still assigned, or the displayed state changed before mutation |
+| `6` | verification warning/failure; requested state may already be persisted despite a secondary IBM CM error |
 
-Always inspect the exit code of write operations:
+Scripts should always inspect the return code, especially `6`.
 
-```bash
-bin/cm-retention itemtype assign TEST_ITEMTYPE POLICY_NAME --yes
-rc=$?
-case "$rc" in
-  0) echo "OK" ;;
-  6) echo "Persisted with IBM CM warning - investigate" >&2 ;;
-  *) echo "Failed: RC=$rc" >&2 ;;
-esac
-```
+## Compatibility with 0.1.x
 
-## Multiple environments
-
-Keep Test and Production configuration separate. Use independent `.env` files instead of editing one file back and forth:
+The old command forms remain accepted in 0.2.0 with a deprecation warning:
 
 ```bash
-cp .env.example /secure/cm-test.env
-cp .env.example /secure/cm-prod.env
-chmod 600 /secure/cm-test.env /secure/cm-prod.env
+cm-retention connection test
+cm-retention itemtype list
+cm-retention itemtype show NAME
+cm-retention itemtype assign ITEMTYPE POLICY --yes
+cm-retention itemtype unassign ITEMTYPE --yes
+cm-retention policy list
+cm-retention policy show POLICY
+cm-retention policy usage POLICY
+cm-retention policy create POLICY --expiration 1y --yes
+cm-retention policy delete POLICY --yes
 ```
 
-Run explicitly against one environment:
-
-```bash
-bin/cm-retention --env /secure/cm-test.env policy list
-bin/cm-retention --env /secure/cm-prod.env policy list
-```
-
-or:
-
-```bash
-CM_RETENTION_ENV=/secure/cm-test.env bin/cm-retention policy list
-```
-
-## Known IBM CM metadata issue
-
-During testing on an older CM installation, itemtype updates exposed legacy component-view metadata with:
-
-```text
-DGL0303A: Invalid parameter
-DKAttrDefICM::getViewOperator() opCode : [-1]
-```
-
-The requested policy assignment could already be persisted before the secondary view-update error occurred. This is why v0.1.2 verifies the stored state after assign/unassign failures and uses exit code `6` for this case.
-
-Do **not** repair IBM CM system tables with a blanket SQL update. See [Troubleshooting](docs/TROUBLESHOOTING.md) and [Metadata repair procedure](docs/METADATA_REPAIR.md).
+New scripts should use the v0.2 top-level commands.
 
 ## Documentation
 
-- [Operations and user guide](DOKUMENTATION.md)
+- [Detailed operations guide](DOKUMENTATION.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [IBM CM metadata repair procedure](docs/METADATA_REPAIR.md)
+- [IBM CM metadata repair notes](docs/METADATA_REPAIR.md)
 - [Changelog](CHANGELOG.md)
-
-## Repository layout
-
-```text
-CM_retention/
-├── .env.example
-├── .gitignore
-├── CHANGELOG.md
-├── DOKUMENTATION.md
-├── README.md
-├── build.sh
-├── install.sh
-├── bin/
-│   └── cm-retention
-├── docs/
-│   ├── METADATA_REPAIR.md
-│   └── TROUBLESHOOTING.md
-└── src/
-    └── CmRetention.java
-```
-
-Generated artifacts and local secrets are intentionally excluded from Git:
-
-```text
-.env
-build/
-*.class
-*.jar
-```

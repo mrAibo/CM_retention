@@ -17,6 +17,7 @@ fi
 read_env_value() {
     local key=$1
     local file=$2
+    [[ -f "$file" ]] || return 0
     awk -v wanted="$key" '
         /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
         {
@@ -38,40 +39,78 @@ read_env_value() {
     ' "$file"
 }
 
-if [[ ! -f "$ENV_FILE" ]]; then
-    echo "ERROR: configuration file not found: $ENV_FILE" >&2
-    echo "Copy .env.example to .env and set CM_PASSWORD." >&2
+preflight_fail() {
+    local label=$1 detail=$2
+    if [[ ${DOCTOR_MODE:-0} == 1 ]]; then
+        printf '[FAIL] %-24s %s\n' "$label" "$detail" >&2
+    else
+        echo "ERROR: $detail" >&2
+    fi
     exit 2
-fi
+}
 
-mode=$(stat -Lc '%a' "$ENV_FILE")
-if (( (8#$mode & 077) != 0 )); then
-    echo "ERROR: insecure permissions on $ENV_FILE: $mode" >&2
-    echo "Expected no group/other permissions, for example: chmod 600 '$ENV_FILE'" >&2
-    exit 2
+preflight_ok() {
+    if [[ ${DOCTOR_MODE:-0} == 1 ]]; then
+        printf '[OK]   %-24s %s\n' "$1" "$2"
+    fi
+}
+
+DOCTOR_MODE=0
+[[ ${1:-} == doctor ]] && DOCTOR_MODE=1
+
+NEEDS_CONFIG=1
+case ${1:-} in
+    version|--version|help|--help|-h) NEEDS_CONFIG=0 ;;
+esac
+for arg in "$@"; do
+    if [[ "$arg" == --help || "$arg" == -h ]]; then
+        NEEDS_CONFIG=0
+    fi
+done
+
+if [[ -f "$ENV_FILE" ]]; then
+    preflight_ok "configuration file" "$ENV_FILE"
+    mode=$(stat -Lc '%a' "$ENV_FILE")
+    if (( (8#$mode & 077) != 0 )); then
+        preflight_fail "configuration mode" "insecure permissions on $ENV_FILE: $mode (expected 600 or stricter)"
+    fi
+    preflight_ok "configuration mode" "$mode"
+elif [[ $NEEDS_CONFIG == 1 ]]; then
+    preflight_fail "configuration file" "configuration file not found: $ENV_FILE"
 fi
 
 : "${IBMCMROOT:=$(read_env_value IBMCMROOT "$ENV_FILE")}" 
 : "${JAVA_HOME:=$(read_env_value JAVA_HOME "$ENV_FILE")}" 
-
 IBMCMROOT=${IBMCMROOT:-/opt/IBM/db2cmv8}
 JAVA_HOME=${JAVA_HOME:-/opt/IBM/WebSphere/AppServer/java/8.0}
 
 JAVA=${JAVA_HOME}/bin/java
-if [[ ! -x "$JAVA" ]]; then
-    echo "ERROR: Java runtime not executable: $JAVA" >&2
-    exit 2
-fi
+[[ -x "$JAVA" ]] || preflight_fail "Java executable" "Java runtime not executable: $JAVA"
+preflight_ok "Java executable" "$JAVA"
+
+SDK=${IBMCMROOT}/lib/cmbicmsdk81.jar
+[[ -f "$SDK" ]] || preflight_fail "IBM CM SDK" "IBM CM SDK not found: $SDK"
+preflight_ok "IBM CM SDK" "$SDK"
+
+[[ -d "${IBMCMROOT}/lib" ]] || preflight_fail "native library path" "IBM CM library directory not found: ${IBMCMROOT}/lib"
+preflight_ok "native library path" "${IBMCMROOT}/lib"
+
+[[ -d "${IBMCMROOT}/cmgmt" ]] || preflight_fail "CM configuration" "IBM CM configuration directory not found: ${IBMCMROOT}/cmgmt"
+preflight_ok "CM configuration" "${IBMCMROOT}/cmgmt"
 
 JAR=${APP_HOME}/build/cm-retention.jar
-if [[ ! -f "$JAR" ]]; then
-    echo "ERROR: tool is not built: $JAR" >&2
-    echo "Run: ${APP_HOME}/build.sh" >&2
-    exit 2
+[[ -f "$JAR" ]] || preflight_fail "application jar" "tool is not built: $JAR (run: ${APP_HOME}/build.sh)"
+preflight_ok "application jar" "$JAR"
+
+if [[ $DOCTOR_MODE == 1 ]]; then
+    echo
+    echo "Java / IBM CM checks"
 fi
 
 export IBMCMROOT JAVA_HOME
-export CM_RETENTION_ENV_FILE="$ENV_FILE"
+if [[ -f "$ENV_FILE" ]]; then
+    export CM_RETENTION_ENV_FILE="$ENV_FILE"
+fi
 export CLASSPATH="${JAR}:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*${CLASSPATH:+:${CLASSPATH}}"
 export LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
