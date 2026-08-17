@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+APP_HOME=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+ENV_FILE=${CM_RETENTION_ENV:-${APP_HOME}/.env}
+
+if [[ ${1:-} == "--env" ]]; then
+    if [[ $# -lt 2 ]]; then
+        echo "ERROR: --env requires a file path" >&2
+        exit 2
+    fi
+    ENV_FILE=$2
+    shift 2
+fi
+
+read_env_value() {
+    local key=$1
+    local file=$2
+    awk -v wanted="$key" '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        {
+            line=$0
+            pos=index(line, "=")
+            if (pos == 0) next
+            key=substr(line, 1, pos-1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            if (key != wanted) next
+            value=substr(line, pos+1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            if ((substr(value,1,1) == "\"" && substr(value,length(value),1) == "\"") ||
+                (substr(value,1,1) == "\047" && substr(value,length(value),1) == "\047")) {
+                value=substr(value,2,length(value)-2)
+            }
+            print value
+            exit
+        }
+    ' "$file"
+}
+
+if [[ ! -f "$ENV_FILE" ]]; then
+    echo "ERROR: configuration file not found: $ENV_FILE" >&2
+    echo "Copy .env.example to .env and set CM_PASSWORD." >&2
+    exit 2
+fi
+
+mode=$(stat -Lc '%a' "$ENV_FILE")
+if (( (8#$mode & 077) != 0 )); then
+    echo "ERROR: insecure permissions on $ENV_FILE: $mode" >&2
+    echo "Expected no group/other permissions, for example: chmod 600 '$ENV_FILE'" >&2
+    exit 2
+fi
+
+: "${IBMCMROOT:=$(read_env_value IBMCMROOT "$ENV_FILE")}" 
+: "${JAVA_HOME:=$(read_env_value JAVA_HOME "$ENV_FILE")}" 
+
+IBMCMROOT=${IBMCMROOT:-/opt/IBM/db2cmv8}
+JAVA_HOME=${JAVA_HOME:-/opt/IBM/WebSphere/AppServer/java/8.0}
+
+JAVA=${JAVA_HOME}/bin/java
+if [[ ! -x "$JAVA" ]]; then
+    echo "ERROR: Java runtime not executable: $JAVA" >&2
+    exit 2
+fi
+
+JAR=${APP_HOME}/build/cm-retention.jar
+if [[ ! -f "$JAR" ]]; then
+    echo "ERROR: tool is not built: $JAR" >&2
+    echo "Run: ${APP_HOME}/build.sh" >&2
+    exit 2
+fi
+
+export IBMCMROOT JAVA_HOME
+export CM_RETENTION_ENV_FILE="$ENV_FILE"
+export CLASSPATH="${JAR}:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*${CLASSPATH:+:${CLASSPATH}}"
+export LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+exec "$JAVA" -cp "$CLASSPATH" CmRetention "$@"
