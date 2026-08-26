@@ -2,7 +2,7 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.3.2**
+Current version: **0.3.3**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no additional runtime dependencies beyond the existing IBM CM / DB2 runtime.
 
@@ -11,16 +11,15 @@ The project intentionally stays narrow: Java 8, the IBM CM SDK already installed
 - list and inspect retention policies
 - list and inspect ItemTypes
 - create fixed-time `AUTO_DELETE` policies
-- create a complete policy directly from a properties template
-- keep multiple reusable policy templates under `profiles/`
+- create policies directly from reusable `.properties` templates
+- automatically recognize a readable `.properties` file after `create`
+- keep multiple policy templates under `profiles/`
 - assign and unassign policies
 - process multiple ItemTypes with `--file`
 - preview writes with `--dry-run`
 - optionally backfill existing objects before assignment with `--backfill`
 - load policy defaults from `ret-policy.properties`
-- override policy defaults with `--properties FILE`
-- show connection/runtime status
-- run deeper diagnostics with `doctor`
+- show connection/runtime status and run diagnostics with `doctor`
 
 The tool does **not** directly delete documents and does not invoke `deleteExpiredItems()` itself.
 
@@ -38,11 +37,14 @@ cm-retention policy [POLICY]
 cm-retention itemtypes
 cm-retention itemtype [ITEMTYPE]
 
-cm-retention create [POLICY] [AGE]
+cm-retention create
+cm-retention create FILE.properties
+cm-retention create POLICY AGE
 cm-retention create --properties FILE
-cm-retention assign [ITEMTYPE] [POLICY]
-cm-retention unassign [ITEMTYPE]
-cm-retention delete [POLICY]
+
+cm-retention assign ITEMTYPE POLICY
+cm-retention unassign ITEMTYPE
+cm-retention delete POLICY
 
 cm-retention assign --file ITEMTYPES.txt POLICY
 cm-retention unassign --file ITEMTYPES.txt
@@ -55,23 +57,16 @@ Run without arguments in a terminal for the small interactive admin menu.
 
 ---
 
-# Policy templates and defaults
+# Policy templates
 
-Version 0.3.2 turns the properties file into a complete reusable policy template.
-
-Every actual properties template must contain:
+Every actual policy template contains at least:
 
 ```properties
 RET_POLICY_NAME=...
+expiration.age=...
 ```
 
-The default template is:
-
-```text
-ret-policy.properties
-```
-
-Default content:
+The complete supported template format is:
 
 ```properties
 RET_POLICY_NAME=AUTO_DELETE_1Y
@@ -90,67 +85,96 @@ auto-delete.max-duration=120
 auto-delete.force-checkin=true
 ```
 
-`auto-delete.force-checkin=true` corresponds to **"Einchecken vor Loeschen erzwingen"** and is intentionally enabled by default.
-
-## Create directly from a template
-
-No policy name or expiration argument is needed when the template contains them:
-
-```bash
-bin/cm-retention create \
-  --properties profiles/auto-delete-5y.properties \
-  --dry-run
-```
-
-Real creation:
-
-```bash
-bin/cm-retention create \
-  --properties profiles/auto-delete-5y.properties
-```
-
-Automation:
-
-```bash
-bin/cm-retention create \
-  --properties profiles/auto-delete-5y.properties \
-  --yes
-```
-
-The supplied file **must contain `RET_POLICY_NAME`**. A selected properties file without that key is rejected instead of silently inheriting another policy name.
-
-## Included templates
+`auto-delete.force-checkin=true` corresponds to **"Einchecken vor Löschen erzwingen"** and is intentionally enabled by default.
 
 The repository and runtime bundle contain:
 
 ```text
+ret-policy.properties
 profiles/auto-delete-1y.properties
 profiles/auto-delete-5y.properties
 profiles/auto-delete-10y.properties
 ```
 
-You can copy one of these and create any number of environment-specific policy templates.
+## Recommended create syntax
 
-Example:
-
-```properties
-RET_POLICY_NAME=AUTO_DELETE_7Y_NIGHT
-retention.type=FIXED_TIME
-retention.enabled=false
-expiration.enabled=true
-expiration.age=7y
-expiration.action=AUTO_DELETE
-auto-delete.schedule=0 3 * * *
-auto-delete.commit-count=100
-auto-delete.max-items=5000
-auto-delete.max-duration=120
-auto-delete.force-checkin=true
-```
-
-Then:
+The normal template workflow is now simply:
 
 ```bash
-bin/cm-retention create --properties profiles/auto-delete-7y-night.properties --dry-run
+bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
+```
+
+If the plan is correct:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties
+```
+
+For automation:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties --yes
+```
+
+The file can also follow normal flags:
+
+```bash
+bin/cm-retention create --dry-run profiles/auto-delete-5y.properties
+```
+
+The tool recognizes the argument as a template only when it:
+
+- ends with `.properties`
+- exists
+- is a regular file
+- is readable
+
+The detected shorthand is internally normalized to the explicit form:
+
+```bash
+bin/cm-retention create --properties profiles/auto-delete-5y.properties
+```
+
+The explicit form remains fully supported.
+
+## Ambiguity rule
+
+Automatic template mode accepts the template as the **only positional create argument**.
+
+This is valid:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties --schedule "0 4 * * *"
+```
+
+This is deliberately rejected:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties 10y
+```
+
+If you want to use a template but override the policy name or expiration age positionally, use the explicit form:
+
+```bash
+bin/cm-retention create TEMP_POLICY 10y \
+  --properties profiles/auto-delete-5y.properties \
+  --dry-run
+```
+
+This avoids ambiguous interpretation.
+
+## Default template
+
+Because the default `ret-policy.properties` contains both `RET_POLICY_NAME` and `expiration.age`, this also works:
+
+```bash
+bin/cm-retention create --dry-run
+```
+
+and then:
+
+```bash
+bin/cm-retention create
 ```
 
 ## Precedence
@@ -159,59 +183,38 @@ When creating a policy, values are resolved in this order:
 
 ```text
 explicit CLI POLICY / AGE / options
-        > --properties FILE
-        > ret-policy.properties
+        > selected properties template
+        > default ret-policy.properties
         > built-in fallback
 ```
 
-This gives two equally supported workflows.
-
-Template-first:
-
-```bash
-bin/cm-retention create --properties profiles/auto-delete-5y.properties
-```
-
-CLI-first:
+Classic CLI creation remains supported:
 
 ```bash
 bin/cm-retention create AUTO_DELETE_5Y 5y
 ```
 
-A positional policy name overrides `RET_POLICY_NAME` and a positional AGE overrides `expiration.age`:
+Advanced overrides remain available:
 
 ```bash
-bin/cm-retention create TEMP_POLICY 30d \
-  --properties profiles/auto-delete-5y.properties \
-  --dry-run
-```
-
-Explicit CLI options also override the selected properties file:
-
-```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y \
-  --properties profiles/auto-delete-5y.properties \
+bin/cm-retention create profiles/auto-delete-5y.properties \
   --schedule "0 4 * * *" \
-  --max-items 10000
+  --commit-count 200 \
+  --max-items 10000 \
+  --max-duration 180
 ```
 
-The default force-checkin can be disabled for one create operation explicitly:
+Force-checkin can be changed for one create operation:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y --no-force-checkin
+bin/cm-retention create profiles/auto-delete-5y.properties --no-force-checkin
 ```
 
-and explicitly enabled with:
-
-```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y --force-checkin
-```
-
-Using both switches together is rejected.
+`--force-checkin` and `--no-force-checkin` together are rejected.
 
 ## Supported semantic model
 
-The properties file contains the semantic policy settings as well, but `cm-retention` intentionally keeps creation constrained to the currently supported safe model:
+Policy creation remains intentionally constrained to:
 
 ```text
 retention.type     = FIXED_TIME
@@ -220,7 +223,7 @@ expiration.enabled = true
 expiration.action  = AUTO_DELETE
 ```
 
-Unsupported semantic values and unknown property names are rejected rather than silently creating a different policy type.
+Unsupported semantic values and unknown property names are rejected.
 
 ---
 
@@ -266,8 +269,6 @@ ibmcmadm
 
 ## Configuration
 
-Create the local configuration:
-
 ```bash
 cp .env.example .env
 chmod 600 .env
@@ -293,7 +294,7 @@ For TEST and PROD, prefer separate files:
 .env.prod
 ```
 
-and call them explicitly:
+and invoke them explicitly:
 
 ```bash
 bin/cm-retention --env .env.test status
@@ -312,29 +313,19 @@ Run on a compatible IBM CM 8.7 build host:
 
 The version is read from `src/CmRetention.java` and written into the JAR manifest and `build/.version`.
 
-For version 0.3.2 the build creates:
+For version 0.3.3 the build creates:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.3.2.jar
+build/cm-retention-0.3.3.jar
 build/.version
 build/ret-policy.properties
 build/profiles/auto-delete-1y.properties
 build/profiles/auto-delete-5y.properties
 build/profiles/auto-delete-10y.properties
-build/cm-retention-0.3.2-runtime.tar.gz
-build/SHA256SUMS-0.3.2
+build/cm-retention-0.3.3-runtime.tar.gz
+build/SHA256SUMS-0.3.3
 ```
-
-Meaning:
-
-- `cm-retention.jar` - stable runtime filename used by the launcher
-- `cm-retention-0.3.2.jar` - immutable versioned JAR
-- `.version` - exact compiled version
-- `ret-policy.properties` - default policy template
-- `profiles/` - reusable policy templates
-- `*-runtime.tar.gz` - transportable runtime package
-- `SHA256SUMS-*` - integrity checks when `sha256sum` is available
 
 Verify:
 
@@ -348,8 +339,8 @@ bin/cm-retention version
 Expected:
 
 ```text
-0.3.2
-cm-retention 0.3.2
+0.3.3
+cm-retention 0.3.3
 ```
 
 ## Deployment without Git
@@ -363,7 +354,7 @@ On the build host:
 Copy:
 
 ```text
-build/cm-retention-0.3.2-runtime.tar.gz
+build/cm-retention-0.3.3-runtime.tar.gz
 ```
 
 to the target server.
@@ -372,8 +363,8 @@ On the target:
 
 ```bash
 cd /home/ibmcmadm
-tar -xzf cm-retention-0.3.2-runtime.tar.gz
-cd cm-retention-0.3.2
+tar -xzf cm-retention-0.3.3-runtime.tar.gz
+cd cm-retention-0.3.3
 
 cp .env.example .env
 chmod 600 .env
@@ -387,50 +378,6 @@ bin/cm-retention status
 
 The target server does not need Git or `javac`.
 
-The runtime archive includes both `ret-policy.properties` and `profiles/*.properties`.
-
----
-
-# Creating a policy
-
-The shortest template workflow is:
-
-```bash
-bin/cm-retention create --properties profiles/auto-delete-1y.properties --dry-run
-```
-
-If the plan is correct:
-
-```bash
-bin/cm-retention create --properties profiles/auto-delete-1y.properties
-```
-
-The default template can even be used with:
-
-```bash
-bin/cm-retention create --dry-run
-```
-
-because `ret-policy.properties` contains both `RET_POLICY_NAME` and `expiration.age`.
-
-The classic syntax remains available:
-
-```bash
-bin/cm-retention create AUTO_DELETE_10Y 10y
-```
-
-Advanced overrides:
-
-```bash
-bin/cm-retention create AUTO_DELETE_10Y 10y \
-  --schedule "0 4 * * *" \
-  --commit-count 200 \
-  --max-items 10000 \
-  --max-duration 180
-```
-
-The plan prints the effective properties source and the final `force-checkin` state before creation.
-
 ---
 
 # Assigning a policy
@@ -438,6 +385,7 @@ The plan prints the effective properties source and the final `force-checkin` st
 Normal assignment does not touch existing document expiration metadata:
 
 ```bash
+bin/cm-retention assign AM AUTO_DELETE_1Y --dry-run
 bin/cm-retention assign AM AUTO_DELETE_1Y
 ```
 
@@ -447,17 +395,9 @@ Automation:
 bin/cm-retention assign AM AUTO_DELETE_1Y --yes
 ```
 
-Dry-run:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --dry-run
-```
-
 ---
 
 # Existing-item backfill
-
-IBM CM does not automatically populate expiration metadata on existing root rows merely because a policy is assigned later.
 
 Use `--backfill` only when existing rows should also receive the expiration date before assignment.
 
@@ -469,8 +409,6 @@ bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 
 The backfill resolves the ItemType root component/table automatically. The user never supplies an `ICMUT...` table name.
 
-## Correct SQL semantics
-
 For eligible rows the equivalent DB2 operation is:
 
 ```sql
@@ -481,13 +419,7 @@ WHERE ICM$RETENTIONDATE IS NULL
   AND CREATETS IS NOT NULL;
 ```
 
-Important: the physical creation timestamp column is:
-
-```text
-CREATETS
-```
-
-not `ICM$CREATETS`.
+Important: the physical creation timestamp column is `CREATETS`, not `ICM$CREATETS`.
 
 For a one-year policy the plan therefore prints:
 
@@ -495,19 +427,16 @@ For a one-year policy the plan therefore prints:
 Formula : ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 ```
 
-The expiration duration is read from the selected policy and is never hard-coded to one year.
+Safety rules include:
 
-## Backfill safety rules
-
-- only rows where both retention and auto-delete dates are NULL are changed
-- existing dates are never overwritten
+- existing retention/auto-delete dates are never overwritten
 - NULL `CREATETS` causes refusal before update
 - a different currently assigned policy causes refusal
-- only supported fixed-time, retention-disabled, AUTO_DELETE policies are accepted
+- only supported FIXED_TIME/AUTO_DELETE policies are accepted
 - root table names are generated internally and validated
-- DB2 UPDATE is committed and verified before policy assignment begins
-- if the DB2 commit succeeded but later assignment/verification is not clean, exit code `6` is returned
-- multi-segment cases currently fail closed instead of partially updating a segment
+- DB2 UPDATE is committed and verified before policy assignment
+- a committed backfill followed by an unclean assignment/verification returns exit code `6`
+- multi-segment cases fail closed
 
 Real execution:
 
@@ -515,13 +444,7 @@ Real execution:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
 ```
 
-Automation:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --yes
-```
-
-See [docs/BACKFILL.md](docs/BACKFILL.md) for the detailed operational procedure.
+See [docs/BACKFILL.md](docs/BACKFILL.md) for the detailed procedure.
 
 ---
 
@@ -536,25 +459,22 @@ INVOICE
 CONTRACT
 ```
 
-Assign:
+Assign dry-run:
 
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --dry-run
-bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y
 ```
 
-Backfill + assign:
+Backfill + assign dry-run:
 
 ```bash
-bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y \
-  --backfill --dry-run
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 ```
 
 Real batch:
 
 ```bash
-bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y \
-  --backfill --yes
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
 Before the first mutation, all ItemTypes are validated. Actual execution is sequential and deliberately non-atomic. If one ItemType fails in phase 2, processing stops and earlier successful changes remain committed.
@@ -614,7 +534,7 @@ plan/count
  -> final DB2 + policy verification
 ```
 
-A DB2 backfill and IBM-CM API assignment are not one distributed transaction. Partial-success conditions are therefore surfaced explicitly instead of hidden.
+A DB2 backfill and IBM-CM API assignment are not one distributed transaction. Partial-success conditions are surfaced explicitly instead of hidden.
 
 ---
 
