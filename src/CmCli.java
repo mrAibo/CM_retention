@@ -104,14 +104,13 @@ final class CmCli {
 
     private void commandCreate(String[] args) throws Exception {
         ParsedArgs parsed = ParsedArgs.parse(args,
-                strings("schedule", "commit-count", "max-items", "max-duration"),
-                strings("yes", "dry-run", "force-checkin"));
+                strings("properties", "schedule", "commit-count", "max-items", "max-duration"),
+                strings("yes", "dry-run", "force-checkin", "no-force-checkin"));
         if (parsed.positional.size() > 2) {
             throw new CliException("Usage: cm-retention create [POLICY] [AGE] [options]", 2);
         }
         String name = parsed.positional.size() >= 1 ? parsed.positional.get(0) : promptRequired("Policy name");
-        String ageValue = parsed.positional.size() >= 2 ? parsed.positional.get(1)
-                : promptRequired("Expiration (for example 1y)");
+        String ageValue = parsed.positional.size() >= 2 ? parsed.positional.get(1) : null;
         createPolicy(name, PolicySettings.from(parsed, ageValue), parsed);
     }
 
@@ -157,6 +156,7 @@ final class CmCli {
 
         System.out.println("Create AUTO_DELETE policy\n");
         System.out.println("Name         : " + name);
+        System.out.println("Properties   : " + settings.propertiesSource);
         System.out.println("Expiration   : " + settings.age.human());
         System.out.println("Action       : AUTO_DELETE");
         System.out.println("Schedule     : " + scheduleHuman(settings.schedule));
@@ -300,8 +300,8 @@ final class CmCli {
             warnLegacy("policy usage", "policy <POLICY>"); service.printPolicy(tail[0]);
         } else if ("create".equals(action)) {
             ParsedArgs parsed = ParsedArgs.parse(tail,
-                    strings("expiration", "schedule", "commit-count", "max-items", "max-duration"),
-                    strings("yes", "dry-run", "force-checkin"));
+                    strings("expiration", "properties", "schedule", "commit-count", "max-items", "max-duration"),
+                    strings("yes", "dry-run", "force-checkin", "no-force-checkin"));
             if (parsed.positional.size() != 1) {
                 throw new CliException("Usage: cm-retention policy create <POLICY> --expiration <AGE> [options]", 2);
             }
@@ -448,7 +448,8 @@ final class CmCli {
         System.out.println("General write flags:");
         System.out.println("  --yes       Skip interactive confirmation (required without a TTY)");
         System.out.println("  --dry-run   Validate and show the plan without changing IBM CM\n");
-        System.out.println("Use 'cm-retention create --help' for advanced policy options.");
+        System.out.println("Policy creation reads ret-policy.properties by default.");
+        System.out.println("Use 'cm-retention create --help' for policy-property and advanced overrides.");
         System.out.println("Legacy 0.1.x command forms remain accepted with a warning.");
     }
 
@@ -464,14 +465,25 @@ final class CmCli {
 
     private static void printCreateHelp() {
         System.out.println("Usage: cm-retention create [POLICY] [AGE] [options]\n");
-        System.out.println("AGE examples: 1y, 12m, 52w, 365d\n");
-        System.out.println("Defaults:");
-        System.out.println("  schedule       daily 02:00 (0 2 * * *)");
-        System.out.println("  commit-count   100\n  max-items      5000 (0 means unlimited)");
-        System.out.println("  max-duration   120 minutes\n  force-checkin  false\n");
-        System.out.println("Advanced overrides:");
-        System.out.println("  --schedule \"0 4 * * *\"\n  --commit-count 200\n  --max-items 10000");
-        System.out.println("  --max-duration 180\n  --force-checkin\n");
+        System.out.println("AGE examples: 1y, 12m, 52w, 365d");
+        System.out.println("If AGE is omitted, expiration.age from the policy properties is used.\n");
+        System.out.println("Properties:");
+        System.out.println("  default file      ret-policy.properties");
+        System.out.println("  override file     --properties /path/to/custom.properties");
+        System.out.println("  precedence        CLI > properties file > built-in defaults\n");
+        System.out.println("Default AUTO_DELETE settings:");
+        System.out.println("  schedule          daily 02:00 (0 2 * * *)");
+        System.out.println("  commit-count      100");
+        System.out.println("  max-items         5000 (0 means unlimited)");
+        System.out.println("  max-duration      120 minutes");
+        System.out.println("  force-checkin     true\n");
+        System.out.println("Advanced CLI overrides:");
+        System.out.println("  --schedule \"0 4 * * *\"");
+        System.out.println("  --commit-count 200");
+        System.out.println("  --max-items 10000");
+        System.out.println("  --max-duration 180");
+        System.out.println("  --force-checkin");
+        System.out.println("  --no-force-checkin\n");
         System.out.println("Safety:\n  --dry-run   Validate/show plan, make no changes");
         System.out.println("  --yes       Skip confirmation; required for non-interactive writes");
     }
