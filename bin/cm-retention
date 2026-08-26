@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 APP_HOME=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 ENV_FILE=${CM_RETENTION_ENV:-${APP_HOME}/.env}
+EXPECTED_VERSION=0.2.0
 
 if [[ ${1:-} == "--env" ]]; then
     if [[ $# -lt 2 ]]; then
@@ -99,8 +100,25 @@ preflight_ok "native library path" "${IBMCMROOT}/lib"
 preflight_ok "CM configuration" "${IBMCMROOT}/cmgmt"
 
 JAR=${APP_HOME}/build/cm-retention.jar
+VERSION_FILE=${APP_HOME}/build/.version
 [[ -f "$JAR" ]] || preflight_fail "application jar" "tool is not built: $JAR (run: ${APP_HOME}/build.sh)"
+
+if [[ ! -f "$VERSION_FILE" ]]; then
+    preflight_fail "build version" "build artifact predates v0.2.0 or is stale; run: ${APP_HOME}/build.sh"
+fi
+BUILT_VERSION=$(tr -d '[:space:]' < "$VERSION_FILE")
+if [[ "$BUILT_VERSION" != "$EXPECTED_VERSION" ]]; then
+    preflight_fail "build version" "stale build: expected $EXPECTED_VERSION but found ${BUILT_VERSION:-unknown}; run: ${APP_HOME}/build.sh"
+fi
 preflight_ok "application jar" "$JAR"
+preflight_ok "build version" "$BUILT_VERSION"
+
+for source in "${APP_HOME}/src/"*.java "${APP_HOME}/build.sh"; do
+    if [[ -e "$source" && "$source" -nt "$JAR" ]]; then
+        preflight_fail "build freshness" "source is newer than the application jar: $source; run: ${APP_HOME}/build.sh"
+    fi
+done
+preflight_ok "build freshness" "source and build artifact are in sync"
 
 if [[ $DOCTOR_MODE == 1 ]]; then
     echo
