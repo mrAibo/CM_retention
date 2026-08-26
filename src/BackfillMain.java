@@ -83,7 +83,7 @@ public final class BackfillMain {
         validateSegment(plan);
         if (plan.missingCreateTimestampRows > 0) {
             throw new CliException("Backfill refused: " + plan.missingCreateTimestampRows
-                    + " row(s) have NULL ICM$CREATETS.", 5);
+                    + " row(s) have NULL CREATETS.", 5);
         }
     }
 
@@ -105,7 +105,7 @@ public final class BackfillMain {
         System.out.println("Component SegmentID       : " + plan.segmentId);
         System.out.println("Root table                : " + plan.tableName);
         System.out.println("Expiration                : " + plan.expirationAmount + " " + plan.expirationUnit);
-        System.out.println("Formula                   : ICM$AUTODELETEDATE = ICM$CREATETS + " + plan.durationSql);
+        System.out.println("Formula                   : ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql);
         System.out.println();
         System.out.println("Root rows total           : " + plan.totalRows);
         System.out.println("Missing both dates        : " + plan.missingRows);
@@ -122,7 +122,7 @@ public final class BackfillMain {
         System.out.println("Applying existing-item backfill");
         System.out.println("  Item type : " + plan.itemTypeName);
         System.out.println("  Table     : " + plan.tableName);
-        System.out.println("  Formula   : ICM$AUTODELETEDATE = ICM$CREATETS + " + plan.durationSql);
+        System.out.println("  Formula   : ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql);
         System.out.println("  Eligible  : " + plan.fillableRows);
     }
 
