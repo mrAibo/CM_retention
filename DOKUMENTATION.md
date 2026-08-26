@@ -1,84 +1,85 @@
-# cm-retention 0.2.0 – Betriebs- und Benutzerdokumentation
+# cm-retention 0.2.1 – Betriebs- und Benutzerdokumentation
 
 ## 1. Zweck
 
-`cm-retention` verwaltet Retention-/Expiration-Policies in IBM Content Manager Enterprise Edition 8.7 über die offizielle Java-API.
+`cm-retention` verwaltet Retention-/Expiration-Policies in IBM Content Manager Enterprise Edition 8.7 über die IBM-CM-Java-API.
 
-Das Werkzeug ist für Administratoren gedacht. Es soll kurz, vorhersehbar und scriptbar bleiben, bietet aber bei einem echten Terminal interaktive Auswahl und Bestätigung.
+Das Werkzeug ist bewusst klein gehalten und für Administratoren gedacht. Es bietet kurze direkte Befehle, einen einfachen interaktiven Modus, Dry-run, Status/Doctor sowie einen kontrollierten Datei-Batch für mehrere ItemTypes.
 
-Bewusste Grenzen:
+Nicht Bestandteil des Werkzeugs sind:
 
-- keine direkte Dokumentlöschung
-- kein manueller Aufruf von `deleteExpiredItems()`
-- kein automatisches Backfill bestehender Dokumente
-- keine Schreibzugriffe auf IBM-CM-Systemtabellen
-- kein GUI-/TUI-Framework
-- keine zusätzliche Runtime-Dependency neben Java 8 und der vorhandenen IBM-CM-Installation
+- direkte Dokumentlöschung
+- manueller Aufruf von `deleteExpiredItems()`
+- automatisches Backfill bestehender Dokumente
+- Schreibzugriffe auf IBM-CM-Systemtabellen
+- implizite Bulk-Logik ohne Vorprüfung
+- GUI/TUI-Frameworks
 
-## 2. Sicherheitsprinzip
+## 2. Sicherheitsmodell
 
-Jede schreibende Operation folgt demselben Ablauf:
+Jede einzelne Write-Operation folgt:
 
 ```text
 1. Ziel auflösen
 2. aktuellen Zustand lesen
-3. Eingaben und Voraussetzungen prüfen
+3. Eingaben/Voraussetzungen validieren
 4. Änderungsplan anzeigen
 5. Dry-run / Bestätigung behandeln
 6. IBM-CM-Änderung ausführen
 7. commit
-8. Zustand erneut lesen / verifizieren
+8. Verbindung/Zustand erneut prüfen
 9. Ergebnis und Exit-Code melden
 ```
 
-Für Assign/Unassign bleibt die besondere Absicherung aus 0.1.2 erhalten: Meldet IBM CM während eines ItemType-Updates einen Fehler, wird die Verbindung geschlossen, neu aufgebaut und der tatsächlich persistierte Policy-Zustand erneut gelesen.
+Bei Assign/Unassign bleibt die besondere Reconnect-/Persistenzprüfung erhalten. Meldet IBM CM nach einer möglicherweise bereits gespeicherten Änderung einen sekundären Fehler, wird der tatsächliche Zustand erneut gelesen. Ist die gewünschte Änderung bereits persistent, endet das Tool bewusst mit Exit-Code `6` statt mit einem falschen sauberen Erfolg.
 
-Wenn die gewünschte Änderung bereits gespeichert wurde, IBM CM danach aber noch einen sekundären Fehler meldet, endet das Tool bewusst mit **Exit-Code 6** und nicht mit einem falschen sauberen Erfolg.
+## 3. Version 0.2.1
 
-Zusätzlich schützt 0.2.0 vor veralteten Plänen: Direkt vor Assign/Unassign wird die aktuelle Zuordnung erneut gelesen. Hat sie sich zwischen Plananzeige und Mutation verändert, wird die Operation mit Exit `5` abgebrochen. Delete prüft die Policy-Nutzung unmittelbar vor dem Löschen erneut.
+Neu gegenüber 0.2.0:
 
-## 3. Installation
+- `--file` für mehrere ItemTypes bei `assign` und `unassign`
+- vollständige Vorvalidierung aller Batch-Einträge vor der ersten Mutation
+- sequenzielle Fail-fast-Ausführung
+- vorkompiliertes versionsgebundenes JAR im Build
+- transportierbares Runtime-TAR.GZ für Server ohne Git und ohne `javac`
+- SHA-256-Datei für versioniertes JAR und Runtime-Paket
+- Build-Version wird direkt aus `CmRetention.VERSION` gelesen
 
-### 3.1 Voraussetzungen
+## 4. Voraussetzungen
 
-Typische Installation:
+Typische Umgebung:
 
 ```text
 IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
-IBM CM SDK=/opt/IBM/db2cmv8/lib/cmbicmsdk81.jar
 ```
 
-### 3.2 Interaktiver Installer
-
-```bash
-./install.sh
-```
-
-Der Installer fragt ab:
+Runtime benötigt:
 
 ```text
-IBM CM root
-Java home
-CM database
-CM user
-CM password
+${IBMCMROOT}/lib/cmbicmsdk81.jar
+${IBMCMROOT}/lib/
+${IBMCMROOT}/cmgmt/
+${JAVA_HOME}/bin/java
 ```
 
-Das Passwort wird mit versteckter Terminaleingabe gelesen. Anschließend:
+Für einen Source-Build zusätzlich:
 
-- `.env` wird erzeugt
-- Dateimodus wird auf `0600` gesetzt
-- `build.sh` wird ausgeführt
-- `cm-retention status` prüft Verbindung und APIs
+```text
+${JAVA_HOME}/bin/javac
+${JAVA_HOME}/bin/jar
+```
 
-Wenn `install.sh` ohne TTY ausgeführt wird, bleibt der automatisierbare Ablauf erhalten: `.env.example` wird als `.env` angelegt, das Projekt gebaut und die noch notwendige Konfiguration angezeigt.
+Empfohlener Runtime-Benutzer: `ibmcmadm`.
 
-## 4. Konfiguration
+## 5. Konfiguration
+
+Einzelsystem:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
+vi .env
 ```
 
 Beispiel:
@@ -91,13 +92,11 @@ IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ```
 
-Die `.env` wird direkt geparst und **nicht** als Shell-Datei ausgeführt.
+Die `.env` wird direkt geparst und nicht als Shell-Datei ausgeführt. Passwörter gehören nicht auf die Kommandozeile.
 
-Passwörter gehören nicht auf die Kommandozeile.
+### TEST und PROD
 
-## 5. TEST und PROD strikt trennen
-
-Für unterschiedliche Content-Manager-Systeme separate Konfigurationsdateien verwenden:
+Empfohlen:
 
 ```text
 .env.test
@@ -106,52 +105,93 @@ Für unterschiedliche Content-Manager-Systeme separate Konfigurationsdateien ver
 
 ```bash
 chmod 600 .env.test .env.prod
-```
-
-Aufruf:
-
-```bash
 bin/cm-retention --env .env.test status
 bin/cm-retention --env .env.prod status
 ```
 
-Damit ist immer sichtbar, gegen welchen dedizierten Server/Alias gearbeitet wird. Nicht eine `.env` ständig zwischen TEST und PROD umschreiben.
+TEST und PROD immer als dedizierte Ziele behandeln. Vor einem PROD-Write zuerst `status` ausführen.
 
-## 6. Build
+## 6. Build auf einem IBM-CM-Host
 
 ```bash
 ./build.sh
 ```
 
-Der Build kompiliert alle Dateien unter `src/` mit Java-8-Source/Target und den lokal installierten IBM-CM-JARs.
+Die Version wird aus:
 
-Ergebnis:
+```java
+CmRetention.VERSION
+```
+
+gelesen und in das JAR-Manifest geschrieben.
+
+Für 0.2.1 entstehen:
 
 ```text
 build/cm-retention.jar
+build/cm-retention-0.2.1.jar
+build/.version
+build/cm-retention-0.2.1-runtime.tar.gz
+build/SHA256SUMS-0.2.1
 ```
 
-Manifest-Version:
+Prüfen:
+
+```bash
+cat build/.version
+ls -lh build/cm-retention*.jar build/*runtime.tar.gz
+```
+
+## 7. Deployment ohne Git
+
+Dieser Weg ist für kontrollierte CM-Server ohne Git vorgesehen.
+
+### 7.1 Auf kompatiblem CM-Host bauen
+
+```bash
+./build.sh
+```
+
+### 7.2 Runtime-Archiv übertragen
 
 ```text
-Implementation-Version: 0.2.0
+build/cm-retention-0.2.1-runtime.tar.gz
 ```
 
-## 7. Architektur
+Das Archiv enthält **keine** IBM-SDK-Dateien und keine Zugangsdaten.
 
-Die v0.2-Quellen sind bewusst klein getrennt:
+### 7.3 Auf Zielsystem entpacken
 
-```text
-src/CmRetention.java   Entry Point, Exit-Codes, zentrale Fehlerausgabe
-src/CmCli.java         Commands, TTY-Interaktion, Pläne, Bestätigungen
-src/CmService.java     IBM-CM-API, Mutationen, Reconnect/Verifikation
-src/Config.java        .env-Konfiguration
-src/CliArgs.java       Parser, PolicySettings, Age, CLI-Exceptions
+```bash
+cd /home/ibmcmadm
+tar -xzf cm-retention-0.2.1-runtime.tar.gz
+cd cm-retention-0.2.1
 ```
 
-Es gibt weiterhin keine externe CLI-Library.
+Auf dem Ziel sind weder Git noch `javac` erforderlich.
 
-## 8. Neue CLI 0.2
+### 7.4 Konfigurieren
+
+```bash
+cp .env.example .env
+chmod 600 .env
+vi .env
+```
+
+### 7.5 Abnehmen
+
+```bash
+cat build/.version
+bin/cm-retention version
+bin/cm-retention doctor
+bin/cm-retention status
+bin/cm-retention policies
+bin/cm-retention itemtypes
+```
+
+Für bestmögliche Binärkompatibilität sollte das Runtime-Paket gegen denselben IBM-CM-8.7-Level/Fixpack wie die Zielsysteme gebaut werden.
+
+## 8. Hauptbefehle
 
 ```text
 cm-retention status
@@ -161,84 +201,25 @@ cm-retention itemtypes
 cm-retention itemtype [ITEMTYPE]
 cm-retention create [POLICY] [AGE]
 cm-retention assign [ITEMTYPE] [POLICY]
+cm-retention assign --file ITEMTYPES.txt POLICY
 cm-retention unassign [ITEMTYPE]
+cm-retention unassign --file ITEMTYPES.txt
 cm-retention delete [POLICY]
 cm-retention doctor
 ```
 
-### Interaktiver Root-Modus
+Ohne Argumente startet bei einem TTY der kleine interaktive Admin-Modus.
 
-```bash
-bin/cm-retention
-```
-
-Bei einem TTY erscheint:
-
-```text
-CM Retention 0.2.0 | LSDB | icmadmin
-
-  1  Policies
-  2  Item types
-  3  Create policy
-  4  Assign policy
-  5  Unassign policy
-  6  Delete policy
-  7  Status
-  8  Doctor
-
-  q  Quit
-```
-
-Es gibt keine Vollbild-GUI. Alle Menüpunkte rufen denselben Command-Core auf wie die direkte CLI.
-
-## 9. Read-only-Befehle
-
-### Status
+## 9. Status und Doctor
 
 ```bash
 bin/cm-retention status
+bin/cm-retention doctor
 ```
 
-Beispiel:
+`status` zeigt u. a. Konfiguration, Java-Version, IBM-CM-API, Datastore sowie Anzahl Policies und ItemTypes.
 
-```text
-CM Retention 0.2.0
-
-Configuration
-  File       : /home/ibmcmadm/cm-retention/.env
-  Database   : LSDB
-  User       : icmadmin
-
-Runtime
-  Java       : 1.8.0_xxx
-  IBM CM API : 8.7.0.000
-
-Content Manager
-  Connection : OK
-  Datastore  : LSDB
-  Policies   : 7
-  Item types : 43
-
-Status       : OK
-```
-
-### Policies
-
-```bash
-bin/cm-retention policies
-bin/cm-retention policy RET_5Y
-```
-
-`policy RET_5Y` zeigt auch die verwendenden ItemTypes. Ein separates `usage` ist in der neuen CLI daher nicht mehr notwendig.
-
-### ItemTypes
-
-```bash
-bin/cm-retention itemtypes
-bin/cm-retention itemtype INVOICE
-```
-
-Unter anderem werden Retention-Policy, Versionierung und Auto-Delete-Einstellungen angezeigt.
+`doctor` prüft zunächst Launcher/Runtime und anschließend Login sowie Policy-/ItemType-API.
 
 ## 10. Create
 
@@ -248,347 +229,230 @@ Normalfall:
 bin/cm-retention create AUTO_DELETE_5Y 5y
 ```
 
-Das Tool erzeugt bewusst eine feste Policy-Struktur:
+Defaults:
 
 ```text
-Retention type     FIXED_TIME
-Retention enabled  false
-Expiration enabled true
-Expiration action  AUTO_DELETE
-```
-
-Standardwerte:
-
-```text
-schedule       0 2 * * *
+schedule       0 2 * * *   (täglich 02:00)
 commit-count   100
 max-items      5000
-max-duration   120
+max-duration   120 Minuten
 force-checkin  false
 ```
 
-Vor der Änderung erscheint ein Plan:
-
-```text
-Create AUTO_DELETE policy
-
-Name         : AUTO_DELETE_5Y
-Expiration   : 5 years
-Action       : AUTO_DELETE
-Schedule     : daily 02:00 (0 2 * * *)
-Limits       : 5000 items / 120 min
-Commit       : every 100 items
-Force checkin: no
-
-Create? [y/N]:
-```
-
-Nur `y`/`yes` führt die Änderung aus. Enter bedeutet Nein.
-
-### Advanced Overrides
+Dry-run:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y \
+bin/cm-retention create AUTO_DELETE_5Y 5y --dry-run
+```
+
+Automation:
+
+```bash
+bin/cm-retention create AUTO_DELETE_5Y 5y --yes
+```
+
+Advanced:
+
+```bash
+bin/cm-retention create RET_10Y 10y \
   --schedule "0 4 * * *" \
   --commit-count 200 \
   --max-items 10000 \
   --max-duration 180
 ```
 
-Optional:
+## 11. Assign / Unassign – Einzeloperation
 
-```text
---force-checkin
-```
-
-Alle Optionen:
+Assign Dry-run:
 
 ```bash
-bin/cm-retention create --help
+bin/cm-retention assign INVOICE AUTO_DELETE_5Y --dry-run
 ```
 
-## 11. Assign
+Interaktiv:
 
 ```bash
 bin/cm-retention assign INVOICE AUTO_DELETE_5Y
 ```
 
-Vor der Änderung:
-
-```text
-Assign retention policy
-
-Item type : INVOICE
-Current   : RET_1Y
-New       : AUTO_DELETE_5Y
-Expiration: 5 YEAR
-Action    : AUTO_DELETE
-
-Existing items are not backfilled.
-
-Apply? [y/N]:
-```
-
-Ist die gewünschte Policy bereits gesetzt:
-
-```text
-No change: INVOICE already uses AUTO_DELETE_5Y.
-```
-
-Exit-Code `0`.
-
-## 12. Unassign
-
-```bash
-bin/cm-retention unassign INVOICE
-```
-
-Ist keine Policy vorhanden:
-
-```text
-No change: INVOICE has no retention policy.
-```
-
-Exit-Code `0`.
-
-## 13. Delete
-
-```bash
-bin/cm-retention delete AUTO_DELETE_5Y
-```
-
-Eine Policy kann nicht gelöscht werden, solange ItemTypes sie verwenden.
-
-Delete ist ebenfalls explizit konservativ:
-
-```text
-Delete permanently? [y/N]:
-```
-
-## 14. Dry-run
-
-Für jede schreibende Top-Level-Operation:
-
-```bash
-bin/cm-retention assign INVOICE AUTO_DELETE_5Y --dry-run
-bin/cm-retention unassign INVOICE --dry-run
-bin/cm-retention create AUTO_DELETE_5Y 5y --dry-run
-bin/cm-retention delete AUTO_DELETE_5Y --dry-run
-```
-
-Dry-run bedeutet:
-
-- Ziele werden aufgelöst
-- Existenz/Usage/Optionen werden validiert
-- aktueller Zustand wird gelesen
-- kompletter Plan wird ausgegeben
-- keine schreibende IBM-CM-Operation wird ausgelöst
-- kein `--yes` erforderlich
-- erfolgreicher Dry-run endet mit `0`
-
-## 15. Interaktive Argumentauflösung
-
-Fehlt in einem TTY ein Argument:
-
-```bash
-bin/cm-retention assign
-```
-
-werden ItemType und Policy angeboten.
-
-Eingabe kann sein:
-
-- Nummer
-- exakter Name
-- eindeutiger Präfix
-
-Beispiel:
-
-```text
-Item type: inv
-Resolved: inv -> INVOICE
-```
-
-Bei mehreren Treffern wird nicht geraten, sondern erneut gefragt.
-
-Wichtig: Diese Präfixauflösung gilt **nur interaktiv**.
-
-In Scripts:
+Non-TTY:
 
 ```bash
 bin/cm-retention assign INVOICE AUTO_DELETE_5Y --yes
 ```
 
-müssen ItemType und Policy exakt angegeben werden.
+Unassign entsprechend:
 
-## 16. Non-TTY / Automation
+```bash
+bin/cm-retention unassign INVOICE --dry-run
+bin/cm-retention unassign INVOICE
+bin/cm-retention unassign INVOICE --yes
+```
+
+Assign und Unassign sind idempotent. Bereits gewünschter Zustand wird als erfolgreicher No-op behandelt.
+
+## 12. Datei-Batch mit `--file`
+
+`--file` ist ausschließlich für `assign` und `unassign` vorgesehen.
+
+### 12.1 Dateiformat
+
+```text
+# Wave 1
+INVOICE
+CONTRACT
+CUSTOMER_DOC
+
+MAIL_ARCHIVE
+```
 
 Regeln:
 
-```text
-vollständige Argumente + --yes   -> Ausführung
-vollständige Argumente + dry-run -> Vorschau
-fehlendes Argument               -> Exit 2
-kein --yes bei echter Write-Operation -> Exit 2
-```
+- ein exakter ItemType-Name pro Zeile
+- Leerzeilen werden ignoriert
+- Zeilen mit `#` am Anfang sind Kommentare
+- führende/nachgestellte Whitespaces werden entfernt
+- keine Prefix-Auflösung im Batch
+- Duplikate werden vor der Ausführung abgelehnt
 
-Damit kann kein Cronjob auf einem Prompt hängen bleiben.
+### 12.2 Assign
 
-## 17. Strikter Parser
-
-Unbekannte Optionen werden abgelehnt:
+Dry-run zuerst:
 
 ```bash
-bin/cm-retention create RET_5Y 5y --max-item 5000
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_5Y --dry-run
 ```
 
-Ergebnis:
-
-```text
-ERROR: Unknown option '--max-item'
-```
-
-Auch doppelte Optionen/Flags werden abgelehnt.
-
-Das ist eine Safety-Funktion gegen Operator-Tippfehler.
-
-## 18. Doctor
+Interaktiv:
 
 ```bash
-bin/cm-retention doctor
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_5Y
 ```
 
-Der Launcher prüft zuerst lokal:
-
-```text
-configuration file
-configuration mode
-Java executable
-IBM CM SDK
-native library path
-CM configuration path
-application JAR
-```
-
-Danach prüft Java:
-
-```text
-configuration readable
-Java runtime
-IBM CM API loaded
-CM login
-policy API
-itemtype API
-```
-
-`doctor` ersetzt nicht die IBM-CM-Logs, ist aber der erste Diagnosebefehl für Installation/Verbindung.
-
-## 19. Legacy-Kompatibilität
-
-0.1.x-Befehle bleiben vorerst erhalten:
-
-```text
-connection test
-itemtype list
-itemtype show
-itemtype assign
-itemtype unassign
-policy list
-policy show
-policy usage
-policy create
-policy delete
-```
-
-Beispiel:
+Automation:
 
 ```bash
-bin/cm-retention policy create RET_1Y --expiration 1y --yes
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_5Y --yes
 ```
 
-wird weiterhin ausgeführt, aber mit Hinweis auf:
+### 12.3 Unassign
 
 ```bash
-bin/cm-retention create RET_1Y 1y --yes
+bin/cm-retention unassign --file itemtypes.txt --dry-run
+bin/cm-retention unassign --file itemtypes.txt
+bin/cm-retention unassign --file itemtypes.txt --yes
 ```
 
-Damit brechen vorhandene Scripts nicht durch das 0.2-Upgrade.
+### 12.4 Ablauf des Batch
 
-## 20. Exit-Codes
+```text
+Phase 1
+  für jeden Eintrag normale Java-Dry-run-Validierung
+  keine Mutation
+
+Nur wenn ALLE Einträge gültig sind:
+
+Phase 2
+  Einträge sequenziell ausführen
+  jede einzelne Änderung committen/verifizieren
+  beim ersten Fehler sofort stoppen
+```
+
+Wichtig: Der Batch ist **nicht atomar**. Beginnt Phase 2 und tritt beim n-ten ItemType ein Fehler auf, bleiben die zuvor erfolgreich bestätigten Änderungen persistent. Spätere ItemTypes werden nicht mehr verarbeitet.
+
+Deshalb:
+
+1. immer erst `--dry-run`,
+2. Ausgabe prüfen,
+3. bei PROD Zielsystem nochmals mit `status` bestätigen,
+4. erst dann echte Ausführung.
+
+Es gibt absichtlich kein `--continue-on-error`.
+
+## 13. Delete
+
+Eine noch verwendete Policy wird nicht gelöscht.
+
+Dry-run:
+
+```bash
+bin/cm-retention delete AUTO_DELETE_5Y --dry-run
+```
+
+Interaktiv:
+
+```bash
+bin/cm-retention delete AUTO_DELETE_5Y
+```
+
+Non-TTY:
+
+```bash
+bin/cm-retention delete AUTO_DELETE_5Y --yes
+```
+
+## 14. TTY vs. Automation
+
+TTY:
+
+- fehlende Einzelargumente können ausgewählt werden
+- Prefix-Matching nur in der interaktiven Auswahl
+- Write-Bestätigung immer `[y/N]`
+
+Non-TTY:
+
+- vollständige Argumente erforderlich
+- exakte Namen
+- echter Write benötigt `--yes`
+- Dry-run benötigt kein `--yes`
+
+Batch-Dateien verwenden immer exakte ItemType-Namen.
+
+## 15. Exit-Codes
 
 | Code | Bedeutung |
 |---:|---|
-| `0` | Erfolg, idempotenter No-op oder erfolgreicher Dry-run |
-| `2` | CLI-/Konfigurations-/Preflight-/Bestätigungsfehler |
+| `0` | Erfolg / No-op / erfolgreicher Dry-run |
+| `2` | CLI-, Konfigurations-, Preflight-, Datei- oder Bestätigungsfehler |
 | `3` | IBM-CM-/Runtime-Fehler |
 | `4` | ItemType oder Policy nicht gefunden |
-| `5` | Konflikt/unsichere Operation; z. B. Policy existiert bereits, wird verwendet oder der angezeigte Zustand wurde zwischenzeitlich geändert |
-| `6` | Verifikationswarnung/-fehler; gewünschter Zustand kann trotz sekundärem IBM-Fehler bereits persistiert sein |
+| `5` | unsichere/konfliktbehaftete Operation bzw. stale state |
+| `6` | Verifikationswarnung/-fehler; gewünschter Zustand kann trotz sekundärem IBM-Fehler bereits persistent sein |
 
-### Exit 6
+Im Datei-Batch wird beim ersten Fehler gestoppt und dessen Exit-Code zurückgegeben.
 
-Gerade bei älteren ItemType-Metadaten kann IBM CM einen Update-Schritt teilweise persistieren und danach beim erneuten Verarbeiten weiterer Metadaten eine Exception werfen.
+## 16. Update / Rollback ohne Git
 
-Assign/Unassign behandelt das so:
+Empfohlen sind versionsgebundene Verzeichnisse:
 
 ```text
-IBM API error
- -> Verbindung schließen
- -> neu verbinden
- -> ItemType erneut lesen
- -> gewünschten Zustand vergleichen
+/home/ibmcmadm/cm-retention-0.2.0
+/home/ibmcmadm/cm-retention-0.2.1
 ```
 
-Ist der gewünschte Zustand bereits gespeichert, meldet das Tool Warning + Exit `6`.
+Beim Update:
 
-Das ist absichtlich weder `0` noch ein gewöhnlicher Fehler `3`.
+1. neues Runtime-Archiv separat entpacken,
+2. `.env` kontrolliert übernehmen,
+3. Rechte `0600` prüfen,
+4. `doctor` und `status` ausführen,
+5. Read-only-Befehle testen,
+6. erst danach administrativ nutzen.
 
-## 21. Retention vs. Expiration
+Rollback bedeutet dann, wieder das zuvor abgenommene versionsgebundene Runtime-Verzeichnis zu verwenden.
 
-`cm-retention create NAME 5y` erstellt eine **Expiration-/Auto-Delete-Policy** mit deaktivierter Retention-Sperrfrist und aktiviertem Expiration-Zeitpunkt.
+## 17. Wichtige fachliche Hinweise
 
-Das ist nicht gleichbedeutend mit einer klassischen Mindestaufbewahrungsfrist.
+- Die vom Tool erzeugten Policies sind `FIXED_TIME`-Expiration-Policies mit `AUTO_DELETE`.
+- Das CLI löscht selbst keine Dokumente.
+- Eine spätere Policy-Zuordnung führt nicht automatisch zu einem Backfill bestehender Dokumente.
+- Direkte Änderungen an IBM-CM-Systemtabellen sind kein Bestandteil des Tools.
 
-Außerdem gilt:
-
-> Das spätere Zuweisen einer Policy zu einem ItemType setzt nicht automatisch rückwirkend Expiration-Daten für bereits existierende Dokumente.
-
-Ein Backfill wäre ein eigener, deutlich riskanterer Prozess und ist bewusst nicht Bestandteil dieses Tools.
-
-## 22. Empfohlener Produktionsworkflow
-
-Vor einer echten Änderung:
-
-```bash
-bin/cm-retention --env .env.prod status
-bin/cm-retention --env .env.prod policy RET_5Y
-bin/cm-retention --env .env.prod itemtype INVOICE
-bin/cm-retention --env .env.prod assign INVOICE RET_5Y --dry-run
-```
-
-Erst danach:
-
-```bash
-bin/cm-retention --env .env.prod assign INVOICE RET_5Y
-```
-
-oder für kontrollierte Automation:
-
-```bash
-bin/cm-retention --env .env.prod assign INVOICE RET_5Y --yes
-```
-
-Anschließend:
-
-```bash
-bin/cm-retention --env .env.prod itemtype INVOICE
-```
-
-## 23. Troubleshooting
+## 18. Troubleshooting
 
 Siehe:
 
 - `docs/TROUBLESHOOTING.md`
 - `docs/METADATA_REPAIR.md`
 
-Die dort dokumentierten IBM-CM-Metadatenprobleme sind **kein Bestandteil der automatischen Tool-Reparatur**. `cm-retention` schreibt niemals direkt in interne CM-Systemtabellen.
+Das Metadatenproblem ist fachlich unabhängig von der CLI-Entwicklung und wird separat behandelt.
