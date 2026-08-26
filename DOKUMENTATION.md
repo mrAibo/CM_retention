@@ -188,6 +188,49 @@ AUTO_DELETE
 
 Andere semantische Property-Werte und unbekannte Property-Namen werden abgelehnt.
 
+### Policy anzeigen und zugewiesene ItemTypes prüfen
+
+Alle Policies mit einer kompakten Übersicht anzeigen:
+
+```bash
+bin/cm-retention policies
+```
+
+Die Spalte `ITEMTYPES` zeigt dabei die **Anzahl** der ItemTypes, denen die jeweilige Policy aktuell zugewiesen ist.
+
+Die vollständigen Details einer einzelnen Policy werden mit folgendem Befehl angezeigt:
+
+```bash
+bin/cm-retention policy POLICY
+```
+
+Beispiel:
+
+```bash
+bin/cm-retention policy AUTO_DELETE_5Y
+```
+
+Neben Retention-/Expiration-Parametern, Auto-Delete-Schedule, Commit-Count, Maximum Items, Maximum Duration und Force-Check-in zeigt der Befehl auch die **konkreten ItemTypes**, denen diese Policy aktuell zugewiesen ist.
+
+Beispiel für den unteren Teil der Ausgabe:
+
+```text
+Assigned itemtypes:         3
+  - AM
+  - CONTRACT
+  - INVOICE
+```
+
+Die ItemTypes werden alphabetisch sortiert ausgegeben.
+
+Ist die Policy keinem ItemType zugewiesen, erscheint:
+
+```text
+Assigned itemtypes:         0
+```
+
+Damit kann vor Änderungen oder vor dem Löschen einer Policy direkt geprüft werden, wo sie verwendet wird.
+
 ## 5. Normaler Assign
 
 ```bash
@@ -342,9 +385,18 @@ bin/cm-retention version
 bin/cm-retention doctor
 bin/cm-retention status
 bin/cm-retention policies
+bin/cm-retention policy AUTO_DELETE_1Y
 bin/cm-retention itemtypes
 bin/cm-retention create profiles/auto-delete-1y.properties --dry-run
 ```
+
+Bei `policy AUTO_DELETE_1Y` muss zusätzlich zur Policy-Konfiguration auch die aktuelle Verwendung angezeigt werden:
+
+```text
+Assigned itemtypes:         <Anzahl>
+```
+
+Bei vorhandenen Zuweisungen folgen darunter die Namen der ItemTypes.
 
 Im Create-Plan muss erscheinen:
 
