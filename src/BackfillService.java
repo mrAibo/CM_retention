@@ -38,7 +38,7 @@ final class BackfillService {
             RootTable root = resolveRootTable(connection, itemType.getIntId());
             String table = qualified(root.tableName);
             String duration = durationSql(policy);
-            String expirationExpression = "ICM$CREATETS + " + duration;
+            String expirationExpression = "CREATETS + " + duration;
             String missing = "ICM$RETENTIONDATE IS NULL AND ICM$AUTODELETEDATE IS NULL";
 
             long total = queryLong(connection, "SELECT COUNT(*) FROM " + table);
@@ -46,13 +46,13 @@ final class BackfillService {
                     "SELECT COUNT(*) FROM " + table + " WHERE " + missing);
             long fillableRows = queryLong(connection,
                     "SELECT COUNT(*) FROM " + table + " WHERE " + missing
-                            + " AND ICM$CREATETS IS NOT NULL");
+                            + " AND CREATETS IS NOT NULL");
             long missingCreateTs = queryLong(connection,
                     "SELECT COUNT(*) FROM " + table + " WHERE " + missing
-                            + " AND ICM$CREATETS IS NULL");
+                            + " AND CREATETS IS NULL");
             long immediateRows = queryLong(connection,
                     "SELECT COUNT(*) FROM " + table + " WHERE " + missing
-                            + " AND ICM$CREATETS IS NOT NULL AND "
+                            + " AND CREATETS IS NOT NULL AND "
                             + expirationExpression + " <= CURRENT TIMESTAMP");
             long existingAutoDelete = queryLong(connection,
                     "SELECT COUNT(*) FROM " + table + " WHERE ICM$AUTODELETEDATE IS NOT NULL");
@@ -73,7 +73,7 @@ final class BackfillService {
     BackfillResult apply(BackfillPlan plan) throws Exception {
         if (plan.missingCreateTimestampRows > 0) {
             throw new CliException("Backfill refused: " + plan.missingCreateTimestampRows
-                    + " eligible row(s) have NULL ICM$CREATETS and cannot be calculated.", 5);
+                    + " eligible row(s) have NULL CREATETS and cannot be calculated.", 5);
         }
         if (plan.fillableRows == 0) {
             return new BackfillResult(0, 0);
@@ -86,10 +86,10 @@ final class BackfillService {
             connection.setAutoCommit(false);
             String table = qualified(plan.tableName);
             String sql = "UPDATE " + table
-                    + " SET ICM$AUTODELETEDATE = ICM$CREATETS + " + plan.durationSql
+                    + " SET ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql
                     + " WHERE ICM$RETENTIONDATE IS NULL"
                     + " AND ICM$AUTODELETEDATE IS NULL"
-                    + " AND ICM$CREATETS IS NOT NULL";
+                    + " AND CREATETS IS NOT NULL";
 
             Statement statement = connection.createStatement();
             try {
