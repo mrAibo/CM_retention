@@ -71,6 +71,7 @@ final class PolicySettings {
     static final int DEFAULT_MAX_DURATION = PolicyDefaults.DEFAULT_MAX_DURATION;
     static final boolean DEFAULT_FORCE_CHECKIN = PolicyDefaults.DEFAULT_FORCE_CHECKIN;
 
+    final String policyName;
     final Age age;
     final String schedule;
     final int commitCount;
@@ -79,8 +80,9 @@ final class PolicySettings {
     final boolean forceCheckin;
     final String propertiesSource;
 
-    PolicySettings(Age age, String schedule, int commitCount, int maxItems,
+    PolicySettings(String policyName, Age age, String schedule, int commitCount, int maxItems,
                    int maxDuration, boolean forceCheckin, String propertiesSource) {
+        this.policyName = policyName;
         this.age = age;
         this.schedule = schedule;
         this.commitCount = commitCount;
@@ -108,6 +110,7 @@ final class PolicySettings {
         if (args.flag("no-force-checkin")) forceCheckin = false;
 
         return new PolicySettings(
+                defaults.policyName,
                 age,
                 schedule,
                 positiveInt(args.option("commit-count", String.valueOf(defaults.commitCount)), "commit-count"),
