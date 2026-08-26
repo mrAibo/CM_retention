@@ -227,17 +227,12 @@ bin/cm-retention --env .env.test status
 bin/cm-retention --env .env.prod status
 ```
 
-## Optional policy-properties path
+Normally `ret-policy.properties` is found automatically next to the selected `.env` / application directory. For a one-command override use the explicit switch:
 
-Normally `ret-policy.properties` is found automatically next to the selected `.env` / application directory.
-
-A fixed default can also be configured with:
-
-```dotenv
-CM_RETENTION_POLICY_PROPERTIES=/home/ibmcmadm/cm-retention/ret-policy.properties
+```bash
+bin/cm-retention create AUTO_DELETE_5Y 5y \
+  --properties /secure/custom-ret-policy.properties
 ```
-
-For a single create command, `--properties FILE` takes precedence.
 
 ---
 
