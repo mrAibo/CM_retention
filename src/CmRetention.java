@@ -3,6 +3,7 @@ import com.ibm.mm.sdk.common.DKException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Locale;
 
 public final class CmRetention {
     static final String VERSION = "0.3.3";
@@ -14,6 +15,7 @@ public final class CmRetention {
         CmService service = null;
         try {
             String[] args = normalizeCreateTemplateArgs(rawArgs);
+            printCreateShortcutHelp(args);
             if (CmCli.handleHelpOrVersionWithoutConfig(args)) {
                 return;
             }
@@ -60,9 +62,10 @@ public final class CmRetention {
      *
      *   cm-retention create --properties profiles/auto-delete-5y.properties --dry-run
      *
-     * Detection is intentionally conservative: only the first create argument is
-     * considered, it must end in .properties, and it must already exist as a
-     * readable regular file. Explicit --properties always wins and is left alone.
+     * Detection is intentionally conservative: a candidate must end in
+     * .properties and already exist as a readable regular file. Explicit
+     * --properties always wins and is left untouched. More than one automatic
+     * template candidate is rejected as ambiguous.
      */
     private static String[] normalizeCreateTemplateArgs(String[] args) {
         if (args == null || args.length < 2 || !"create".equals(args[0])) {
@@ -74,25 +77,47 @@ public final class CmRetention {
             }
         }
 
-        String candidate = args[1];
-        if (candidate == null || candidate.startsWith("--")
-                || !candidate.toLowerCase(java.util.Locale.ROOT).endsWith(".properties")) {
-            return args;
+        int candidateIndex = -1;
+        for (int i = 1; i < args.length; i++) {
+            String candidate = args[i];
+            if (candidate == null || candidate.startsWith("--")
+                    || !candidate.toLowerCase(Locale.ROOT).endsWith(".properties")) {
+                continue;
+            }
+            Path path = Paths.get(candidate);
+            if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
+                continue;
+            }
+            if (candidateIndex >= 0) {
+                throw new CliException("Multiple readable .properties files supplied to create; use --properties FILE explicitly", 2);
+            }
+            candidateIndex = i;
         }
 
-        Path path = Paths.get(candidate);
-        if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
+        if (candidateIndex < 0) {
             return args;
         }
 
         String[] normalized = new String[args.length + 1];
-        normalized[0] = "create";
-        normalized[1] = "--properties";
-        normalized[2] = candidate;
-        if (args.length > 2) {
-            System.arraycopy(args, 2, normalized, 3, args.length - 2);
+        int target = 0;
+        for (int i = 0; i < args.length; i++) {
+            if (i == candidateIndex) {
+                normalized[target++] = "--properties";
+            }
+            normalized[target++] = args[i];
         }
         return normalized;
+    }
+
+    private static void printCreateShortcutHelp(String[] args) {
+        if (args.length < 2 || !"create".equals(args[0])) return;
+        for (String arg : args) {
+            if ("--help".equals(arg) || "-h".equals(arg)) {
+                System.out.println("Shortcut: cm-retention create FILE.properties [options]");
+                System.out.println("          A readable .properties file is detected automatically.\n");
+                return;
+            }
+        }
     }
 
     private static void printDkException(DKException e) {
