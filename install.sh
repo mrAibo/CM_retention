@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TARGET=${1:-/home/ibmcmadm/cm-retention}
+APP_VERSION=$(sed -n 's/^[[:space:]]*static final String VERSION = "\([^"]*\)";[[:space:]]*$/\1/p' "${ROOT}/src/CmRetention.java" | head -n 1)
 
 prompt_default() {
     local label=$1 default=$2 value
@@ -21,8 +22,13 @@ fi
 
 cd "$TARGET"
 
-echo "CM Retention 0.2.0 installer"
+echo "CM Retention ${APP_VERSION:-unknown} installer"
 echo
+
+[[ -f ret-policy.properties ]] || {
+    echo "ERROR: ret-policy.properties is missing" >&2
+    exit 2
+}
 
 if [[ -t 0 && -t 1 ]]; then
     if [[ -f .env ]]; then
@@ -49,10 +55,14 @@ ENV
         echo "[OK] configuration written (.env mode 600)"
     fi
 
+    echo "Policy defaults: $TARGET/ret-policy.properties"
+    echo "  auto-delete.force-checkin=true"
+    echo
     echo "Building..."
     ./build.sh
     echo
     echo "Testing installation..."
+    bin/cm-retention version
     bin/cm-retention status
     echo
     echo "Installed successfully: $TARGET"
@@ -66,5 +76,6 @@ else
     echo
     echo "Installed in: $TARGET"
     echo "Edit:         $TARGET/.env"
+    echo "Policy file:  $TARGET/ret-policy.properties"
     echo "Test:         $TARGET/bin/cm-retention status"
 fi
