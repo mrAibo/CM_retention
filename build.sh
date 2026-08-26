@@ -40,6 +40,7 @@ JAR=${JAVA_HOME}/bin/jar
 [[ -x "$JAVAC" ]] || { echo "ERROR: javac not found: $JAVAC" >&2; exit 2; }
 [[ -x "$JAR" ]] || { echo "ERROR: jar not found: $JAR" >&2; exit 2; }
 [[ -f "${IBMCMROOT}/lib/cmbicmsdk81.jar" ]] || { echo "ERROR: IBM CM SDK not found under ${IBMCMROOT}/lib" >&2; exit 2; }
+[[ -f "${ROOT}/ret-policy.properties" ]] || { echo "ERROR: missing ret-policy.properties" >&2; exit 2; }
 command -v tar >/dev/null 2>&1 || { echo "ERROR: tar is required to create the runtime package" >&2; exit 2; }
 
 rm -rf "${BUILD_DIR}/classes" "${BUILD_DIR}/runtime"
@@ -68,8 +69,9 @@ CURRENT_JAR="${BUILD_DIR}/cm-retention.jar"
 "$JAR" cfm "$VERSIONED_JAR" "${BUILD_DIR}/manifest.mf" -C "${BUILD_DIR}/classes" .
 cp -f "$VERSIONED_JAR" "$CURRENT_JAR"
 printf '%s\n' "$APP_VERSION" > "${BUILD_DIR}/.version"
+cp -f "${ROOT}/ret-policy.properties" "${BUILD_DIR}/ret-policy.properties"
 
-# Build a transportable runtime bundle.  It intentionally contains no IBM SDK
+# Build a transportable runtime bundle. It intentionally contains no IBM SDK
 # or credentials; those are supplied by the target IBM CM installation.
 RUNTIME_NAME="cm-retention-${APP_VERSION}"
 RUNTIME_STAGE="${BUILD_DIR}/runtime/${RUNTIME_NAME}"
@@ -81,6 +83,7 @@ chmod 755 "${RUNTIME_STAGE}/bin/cm-retention"
 cp "$CURRENT_JAR" "${RUNTIME_STAGE}/build/cm-retention.jar"
 cp "$VERSIONED_JAR" "${RUNTIME_STAGE}/build/"
 cp "${BUILD_DIR}/.version" "${RUNTIME_STAGE}/build/.version"
+cp "${ROOT}/ret-policy.properties" "${RUNTIME_STAGE}/ret-policy.properties"
 cp "${ROOT}/.env.example" "${RUNTIME_STAGE}/.env.example"
 cp "${ROOT}/README.md" "${ROOT}/DOKUMENTATION.md" "${ROOT}/CHANGELOG.md" "${RUNTIME_STAGE}/"
 cp "${ROOT}/docs/"*.md "${RUNTIME_STAGE}/docs/"
@@ -100,13 +103,14 @@ Installation:
        cp .env.example .env
        chmod 600 .env
        vi .env
-  4. Verify the packaged version:
+  4. Review ret-policy.properties. Default AUTO_DELETE force-checkin is true.
+  5. Verify the packaged version:
        cat build/.version
        bin/cm-retention version
-  5. Verify the target IBM CM environment:
+  6. Verify the target IBM CM environment:
        bin/cm-retention doctor
        bin/cm-retention status
-  6. Start with read-only commands or --dry-run before a real write.
+  7. Start with read-only commands or --dry-run before a real write.
 
 For separate TEST/PROD targets use separate .env.test/.env.prod files and
 invoke them explicitly with --env.
@@ -132,6 +136,7 @@ printf 'Built version:  %s\n' "$APP_VERSION"
 printf 'Runtime JAR:    %s\n' "$CURRENT_JAR"
 printf 'Versioned JAR:  %s\n' "$VERSIONED_JAR"
 printf 'Version file:   %s\n' "${BUILD_DIR}/.version"
+printf 'Policy config:  %s\n' "${BUILD_DIR}/ret-policy.properties"
 printf 'Runtime bundle: %s\n' "$RUNTIME_TAR"
 if [[ -f "$CHECKSUM_FILE" ]]; then
     printf 'Checksums:      %s\n' "$CHECKSUM_FILE"
