@@ -85,8 +85,11 @@ public final class CmRetention {
                 if (i + 1 < args.length) i++;
                 continue;
             }
-            if (value != null && value.startsWith("--")) {
+            if (isKnownCreateFlag(value)) {
                 continue;
+            }
+            if (value != null && value.startsWith("--")) {
+                return args;
             }
 
             positionalCount++;
@@ -121,6 +124,15 @@ public final class CmRetention {
                 || "--commit-count".equals(value)
                 || "--max-items".equals(value)
                 || "--max-duration".equals(value);
+    }
+
+    private static boolean isKnownCreateFlag(String value) {
+        return "--yes".equals(value)
+                || "--dry-run".equals(value)
+                || "--force-checkin".equals(value)
+                || "--no-force-checkin".equals(value)
+                || "--help".equals(value)
+                || "-h".equals(value);
     }
 
     private static boolean isReadablePropertiesFile(String value) {
