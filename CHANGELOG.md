@@ -2,6 +2,21 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.3.2
+
+Self-contained policy-template workflow:
+
+- added required `RET_POLICY_NAME` to policy properties templates
+- `create --properties FILE` now creates a policy without positional POLICY/AGE arguments
+- policy name is read from `RET_POLICY_NAME`; expiration age is read from `expiration.age`
+- positional `POLICY` and `AGE` remain supported and override the selected template values
+- an explicitly selected properties file without `RET_POLICY_NAME` is rejected
+- default `ret-policy.properties` is now a complete `AUTO_DELETE_1Y` template
+- added reusable templates under `profiles/` for 1-year, 5-year and 10-year AUTO_DELETE policies
+- build copies policy profiles into `build/profiles/` and packages them into the no-Git runtime bundle
+- updated help, README and operations documentation for template-first policy creation
+- bumped runtime/package version to `0.3.2`
+
 ## 0.3.1
 
 Backfill correctness and policy-defaults update:
