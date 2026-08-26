@@ -62,10 +62,10 @@ public final class CmRetention {
      *
      *   cm-retention create --properties profiles/auto-delete-5y.properties --dry-run
      *
-     * Detection is intentionally conservative: a candidate must end in
-     * .properties and already exist as a readable regular file. Explicit
-     * --properties always wins and is left untouched. More than one automatic
-     * template candidate is rejected as ambiguous.
+     * Detection is intentionally conservative: the template must be the only
+     * positional create argument, end in .properties, and already exist as a
+     * readable regular file. Explicit --properties always wins and is left
+     * untouched. Advanced option values are not mistaken for positional args.
      */
     private static String[] normalizeCreateTemplateArgs(String[] args) {
         if (args == null || args.length < 2 || !"create".equals(args[0])) {
@@ -78,24 +78,31 @@ public final class CmRetention {
         }
 
         int candidateIndex = -1;
+        int positionalCount = 0;
         for (int i = 1; i < args.length; i++) {
-            String candidate = args[i];
-            if (candidate == null || candidate.startsWith("--")
-                    || !candidate.toLowerCase(Locale.ROOT).endsWith(".properties")) {
+            String value = args[i];
+            if (isCreateOptionWithValue(value)) {
+                if (i + 1 < args.length) i++;
                 continue;
             }
-            Path path = Paths.get(candidate);
-            if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
+            if (value != null && value.startsWith("--")) {
                 continue;
             }
-            if (candidateIndex >= 0) {
-                throw new CliException("Multiple readable .properties files supplied to create; use --properties FILE explicitly", 2);
+
+            positionalCount++;
+            if (isReadablePropertiesFile(value)) {
+                if (candidateIndex >= 0) {
+                    throw new CliException("Multiple readable .properties files supplied to create; use --properties FILE explicitly", 2);
+                }
+                candidateIndex = i;
             }
-            candidateIndex = i;
         }
 
         if (candidateIndex < 0) {
             return args;
+        }
+        if (positionalCount != 1) {
+            throw new CliException("Automatic template syntax requires FILE.properties to be the only positional create argument. Use --properties FILE when overriding POLICY or AGE.", 2);
         }
 
         String[] normalized = new String[args.length + 1];
@@ -107,6 +114,21 @@ public final class CmRetention {
             normalized[target++] = args[i];
         }
         return normalized;
+    }
+
+    private static boolean isCreateOptionWithValue(String value) {
+        return "--schedule".equals(value)
+                || "--commit-count".equals(value)
+                || "--max-items".equals(value)
+                || "--max-duration".equals(value);
+    }
+
+    private static boolean isReadablePropertiesFile(String value) {
+        if (value == null || !value.toLowerCase(Locale.ROOT).endsWith(".properties")) {
+            return false;
+        }
+        Path path = Paths.get(value);
+        return Files.isRegularFile(path) && Files.isReadable(path);
     }
 
     private static void printCreateShortcutHelp(String[] args) {
