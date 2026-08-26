@@ -1,7 +1,7 @@
 import com.ibm.mm.sdk.common.DKException;
 
 public final class CmRetention {
-    static final String VERSION = "0.2.0";
+    static final String VERSION = "0.2.1";
 
     private CmRetention() {}
 
