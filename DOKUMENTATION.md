@@ -1,265 +1,109 @@
-# cm-retention 0.3.0 – Betriebs- und Benutzerdokumentation
+# cm-retention 0.3.1 – Betriebs- und Benutzerdokumentation
 
 ## 1. Zweck
 
 `cm-retention` verwaltet Retention-/Expiration-Policies in IBM Content Manager Enterprise Edition 8.7.
 
-Die normale Policy-Administration erfolgt über die IBM-CM-Java-API. Zusätzlich gibt es seit 0.3.0 einen **expliziten, opt-in bestehenden-Objekt-Backfill** über DB2, der ausschließlich mit `assign ... --backfill` aktiviert wird.
+Das Werkzeug ist bewusst klein und administrativ gehalten. Es unterstützt:
 
-Das Werkzeug bleibt bewusst klein und admin-orientiert: kurze Befehle, Dry-run, interaktive Bestätigung, Status/Doctor, Datei-Batch und klare Exit-Codes.
+- Policy- und ItemType-Anzeige
+- Erstellen von FIXED_TIME/AUTO_DELETE-Policies
+- Assign/Unassign
+- Dry-run
+- Datei-Batch mit `--file`
+- expliziten Existing-Item-Backfill mit `--backfill`
+- Policy-Defaults über `ret-policy.properties`
 
-## 2. Bewusste Grenzen
-
-Nicht automatisch durchgeführt werden:
-
-- direkte Dokumentlöschung
-- manueller Aufruf von `deleteExpiredItems()`
-- impliziter Backfill bei normalem `assign`
-- Überschreiben bereits gesetzter Retention-/Auto-Delete-Daten
-- Event-Driven-Konvertierungen
-- frei eingebbares SQL oder frei eingebbare Tabellennamen
-- stilles Bulk-Verhalten ohne Vorprüfung
-
-Ein normaler Befehl:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y
-```
-
-ändert weiterhin **keine** bestehenden Objekte.
-
-Nur:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
-```
-
-aktiviert den bestehenden-Objekt-Backfill.
-
-## 3. Sicherheitsmodell
-
-Normale einzelne Write-Operationen folgen:
-
-```text
-1. Ziel auflösen
-2. aktuellen Zustand lesen
-3. Eingaben/Voraussetzungen validieren
-4. Änderungsplan anzeigen
-5. Dry-run / Bestätigung behandeln
-6. IBM-CM-Änderung ausführen
-7. commit
-8. Verbindung/Zustand erneut prüfen
-9. Ergebnis/Exit-Code melden
-```
-
-Assign/Unassign behalten die besondere Persistenzprüfung: meldet IBM CM nach einem ItemType-Update einen Fehler, wird die Verbindung neu aufgebaut und der tatsächlich persistierte Zustand erneut gelesen.
-
-Wenn der gewünschte Zustand bereits gespeichert wurde, IBM CM danach aber noch einen sekundären Fehler meldet, wird **Exit 6** verwendet.
-
-## 4. Backfill-Sicherheitsmodell
-
-`--backfill` ist ein eigener zweistufiger Ablauf:
-
-```text
-1. ItemType + Policy über IBM CM auflösen
-2. Policy-Typ validieren
-3. aktuellen Policy-Zustand des ItemTypes prüfen
-4. Root-Component/-Tabelle automatisch ermitteln
-5. DB2 Counts / sofort fällige Zeilen ermitteln
-6. Dry-run bzw. explizite Bestätigung
-7. DB2 UPDATE
-8. DB2 COMMIT
-9. verbleibende NULL-Zeilen prüfen
-10. erst danach Policy über IBM CM zuweisen
-11. IBM-CM-Persistenz erneut verifizieren
-12. abschließend Policy + DB2-NULL-Zustand erneut prüfen
-```
-
-DB2-Backfill und IBM-CM-Policy-Assignment sind **keine gemeinsame Distributed Transaction**. Falls der DB2-Commit bereits erfolgt ist und die spätere Zuweisung/Endprüfung nicht sauber endet, wird der Zustand als teilweise/unsicher behandelt und **Exit 6** verwendet.
-
-## 5. Voraussetzungen
-
-Typische Installation:
-
-```text
-IBMCMROOT=/opt/IBM/db2cmv8
-JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
-```
-
-Benötigt für normale Laufzeit:
-
-```text
-${IBMCMROOT}/lib/cmbicmsdk81.jar
-${IBMCMROOT}/cmgmt/
-${IBMCMROOT}/lib/
-${JAVA_HOME}/bin/java
-```
-
-Nur zum Build aus Source zusätzlich:
-
-```text
-${JAVA_HOME}/bin/javac
-${JAVA_HOME}/bin/jar
-```
-
-Für `--backfill` wird außerdem der DB2-JCC-Treiber (`db2jcc4.jar`) benötigt.
-
-## 6. Konfiguration
-
-Minimale `.env`:
-
-```dotenv
-CM_DATABASE=LSDB
-CM_USER=icmadmin
-CM_PASSWORD=CHANGE_ME
-IBMCMROOT=/opt/IBM/db2cmv8
-JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
-```
-
-Datei absichern:
-
-```bash
-chmod 600 .env
-```
-
-Die `.env` wird nicht als Shell-Skript ausgeführt. Passwörter erscheinen nicht in CLI-Argumenten.
-
-### 6.1 DB2-Konfiguration für `--backfill`
-
-Optional:
-
-```dotenv
-DB2_DATABASE=LSDB
-DB2_JDBC_URL=jdbc:db2:LSDB
-DB2_USER=icmadmin
-DB2_PASSWORD=CHANGE_ME
-DB2_SCHEMA=ICMADMIN
-DB2_JDBC_JAR=/opt/IBM/db2/V11.5/java/db2jcc4.jar
-```
-
-Defaults:
-
-```text
-DB2_DATABASE -> CM_DATABASE
-DB2_JDBC_URL -> jdbc:db2:<DB2_DATABASE>
-DB2_USER     -> CM_USER
-DB2_PASSWORD -> CM_PASSWORD
-DB2_SCHEMA   -> ICMADMIN
-```
-
-Wenn der CM-Alias nicht als DB2-Alias nutzbar ist, `DB2_JDBC_URL` explizit setzen, z. B.:
-
-```dotenv
-DB2_JDBC_URL=jdbc:db2://dbhost.example:50000/LSDB
-```
-
-Der DB2-Benutzer benötigt SELECT-Rechte auf die relevanten CM-Metadaten-/Root-Tabellen und UPDATE-Rechte auf die Ziel-Root-Tabelle.
-
-## 7. TEST und PROD trennen
-
-Empfohlen:
-
-```text
-.env.test
-.env.prod
-```
-
-```bash
-chmod 600 .env.test .env.prod
-
-bin/cm-retention --env .env.test status
-bin/cm-retention --env .env.prod status
-```
-
-Vor jeder produktiven Änderung zuerst mit exakt derselben `--env`-Datei `status` ausführen.
-
-## 8. Build
-
-```bash
-./build.sh
-```
-
-Für 0.3.0 entstehen:
-
-```text
-build/cm-retention.jar
-build/cm-retention-0.3.0.jar
-build/.version
-build/cm-retention-0.3.0-runtime.tar.gz
-build/SHA256SUMS-0.3.0
-```
-
-`cm-retention-0.3.0-runtime.tar.gz` ist das bevorzugte Paket für Zielserver ohne Git und ohne `javac`.
-
-## 9. Erste Abnahme
+## 2. Version
 
 ```bash
 bin/cm-retention version
-bin/cm-retention doctor
-bin/cm-retention status
-bin/cm-retention policies
-bin/cm-retention itemtypes
 ```
 
-Erst danach Write-Operationen testen.
-
-## 10. Read-only-Befehle
-
-```bash
-bin/cm-retention status
-bin/cm-retention doctor
-bin/cm-retention policies
-bin/cm-retention policy AUTO_DELETE_1Y
-bin/cm-retention itemtypes
-bin/cm-retention itemtype AM
-```
-
-## 11. Policy erstellen
-
-Normal:
-
-```bash
-bin/cm-retention create AUTO_DELETE_1Y 1y
-```
-
-Defaults:
+Erwartet:
 
 ```text
-Retention type    FIXED_TIME
-Retention enabled false
-Expiration        enabled
-Action            AUTO_DELETE
-Schedule          0 2 * * *
-Commit count      100
-Max items         5000
-Max duration      120 Minuten
-Force check-in    false
+cm-retention 0.3.1
 ```
 
-Dry-run:
+## 3. Policy-Defaults
+
+Die Standardparameter stehen in:
+
+```text
+ret-policy.properties
+```
+
+Standard:
+
+```properties
+retention.type=FIXED_TIME
+retention.enabled=false
+expiration.enabled=true
+expiration.age=1y
+expiration.action=AUTO_DELETE
+
+auto-delete.schedule=0 2 * * *
+auto-delete.commit-count=100
+auto-delete.max-items=5000
+auto-delete.max-duration=120
+auto-delete.force-checkin=true
+```
+
+`auto-delete.force-checkin=true` bedeutet: **Einchecken vor Löschen erzwingen**.
+
+### Priorität
+
+```text
+CLI > --properties FILE > ret-policy.properties > eingebaute Defaults
+```
+
+Beispiele:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_1Y 1y --dry-run
+bin/cm-retention create AUTO_DELETE_1Y
+bin/cm-retention create AUTO_DELETE_5Y 5y
+bin/cm-retention create AUTO_DELETE_5Y 5y --properties /secure/ret-5y.properties
 ```
 
-## 12. Normale Policy-Zuweisung
+Ein einzelner CLI-Override gewinnt gegen die Properties:
+
+```bash
+bin/cm-retention create AUTO_DELETE_5Y 5y \
+  --properties /secure/ret-5y.properties \
+  --schedule "0 4 * * *" \
+  --max-items 10000
+```
+
+Default Force-Checkin deaktivieren:
+
+```bash
+bin/cm-retention create AUTO_DELETE_5Y 5y --no-force-checkin
+```
+
+## 4. Unterstütztes Policy-Modell
+
+Policy-Erstellung ist absichtlich auf folgendes Modell begrenzt:
+
+```text
+FIXED_TIME
+Retention disabled
+Expiration enabled
+AUTO_DELETE
+```
+
+Andere semantische Property-Werte werden abgelehnt.
+
+## 5. Normaler Assign
 
 ```bash
 bin/cm-retention assign AM AUTO_DELETE_1Y --dry-run
 bin/cm-retention assign AM AUTO_DELETE_1Y
 ```
 
-Diese Variante backfillt bestehende Objekte **nicht**.
+Ohne `--backfill` werden bestehende Objekte nicht verändert.
 
-Automation:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --yes
-```
-
-## 13. Existing-item Backfill
-
-Ziel: bei bestehenden Root-Zeilen, bei denen beide Felder NULL sind, das Auto-Delete-Datum aus dem Erstellungszeitpunkt plus echter Policy-Frist berechnen.
+## 6. Existing-Item-Backfill
 
 Dry-run:
 
@@ -267,219 +111,125 @@ Dry-run:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 ```
 
-Der Plan zeigt u. a.:
+Die korrekte DB2-Formel lautet:
 
 ```text
-ItemType ID
-Root component ID
-Root table
-Policy-Frist
-Formel
-Root rows total
-Missing both dates
-Backfillable rows
-NULL create timestamp
-Immediately expired after
-Already auto-delete dated
-Retention date already set
+ICM$AUTODELETEDATE = CREATETS + <Policy-Frist>
 ```
-
-Die äquivalente SQL-Logik lautet:
-
-```sql
-UPDATE ICMADMIN.<ROOT_TABLE>
-SET ICM$AUTODELETEDATE = ICM$CREATETS + <POLICY_EXPIRATION>
-WHERE ICM$RETENTIONDATE IS NULL
-  AND ICM$AUTODELETEDATE IS NULL
-  AND ICM$CREATETS IS NOT NULL;
-```
-
-Die Frist wird aus der Policy gelesen (`YEAR`, `MONTH`, `WEEK`, `DAY`) und nicht fest verdrahtet.
-
-### 13.1 Zulässige Policies
-
-Backfill akzeptiert nur:
-
-```text
-Retention type     FIXED_TIME
-Retention enabled  false
-Expiration enabled true
-Expiration action  AUTO_DELETE
-Expiration period  > 0
-```
-
-### 13.2 Abbruchbedingungen
-
-Backfill wird verweigert bei:
-
-- anderer bereits zugewiesener Policy
-- retention-enabled Policy
-- Event-Driven Policy
-- non-AUTO_DELETE Action
-- ungültiger/unsupported Time Unit
-- NULL `ICM$CREATETS` bei einer zu backfillenden Zeile
-- nicht eindeutig ermittelbarer Root-Component
-- fehlendem DB2-Treiber/Zugriff
-
-### 13.3 Root-Tabelle
-
-Der Benutzer gibt keinen Tabellennamen an.
-
-Die Anwendung ermittelt über:
-
-```text
-ICMSTCOMPDEFS
-ICMSTITEMTYPEDEFS
-```
-
-für die IBM-CM-ItemType-ID den Root-Component (`PARENTCOMPTYPEID=0`) und daraus `ICMUT...` inklusive Segment-ID.
-
-### 13.4 Sofort fällige Objekte
-
-Der Dry-run zählt explizit Zeilen, deren berechnetes Auto-Delete-Datum bereits in der Vergangenheit liegt.
 
 Beispiel:
 
 ```text
-Erstellt: 2022
-Policy:   +1 YEAR
-Ergebnis: Auto-Delete-Datum 2023
+Formula : ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 ```
 
-Diese Zeilen werden nach Policy-Zuweisung unmittelbar für den AUTO_DELETE-Prozess fällig. Dieser Count muss vor PROD-Ausführung geprüft werden.
+Das zugrunde liegende SQL entspricht:
 
-### 13.5 Echte Ausführung
+```sql
+UPDATE ICMADMIN.<ROOT_TABLE>
+SET ICM$AUTODELETEDATE = CREATETS + 1 YEAR
+WHERE ICM$RETENTIONDATE IS NULL
+  AND ICM$AUTODELETEDATE IS NULL
+  AND CREATETS IS NOT NULL;
+```
+
+Wichtig: die physische Erstellungszeit-Spalte heißt `CREATETS`, nicht `ICM$CREATETS`.
+
+Reale Ausführung:
 
 ```bash
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
 ```
 
-oder non-interactive:
+Siehe zusätzlich [docs/BACKFILL.md](docs/BACKFILL.md).
 
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --yes
-```
-
-Wenn dieselbe Policy bereits zugewiesen ist, darf `--backfill` als Recovery für verbliebene NULL-Zeilen verwendet werden.
-
-Wenn eine **andere** Policy zugewiesen ist, wird abgebrochen, damit nicht unbemerkt gemischte Datumslogik entsteht.
-
-## 14. Datei-Batch
-
-Beispiel `itemtypes.txt`:
+## 7. Batch
 
 ```text
-# Kommentar
+# itemtypes.txt
 AM
 INVOICE
 CONTRACT
 ```
 
-Ohne Backfill:
+Dry-run:
 
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --dry-run
-bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y
 ```
 
 Mit Backfill:
 
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
-bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill
 ```
 
-Automation:
+Vor dem ersten Write werden alle Einträge validiert. Die eigentliche Ausführung ist sequenziell und nicht atomar.
 
-```bash
-bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
-```
+## 8. Sicherheitsmodell
 
-Phase 1 prüft **alle** Einträge ohne Mutation. Erst wenn alle grün sind, beginnt Phase 2.
-
-Phase 2 ist sequenziell und nicht atomar. Mit Backfill gilt pro ItemType:
+Normaler Write:
 
 ```text
-DB2 backfill -> verify -> policy assignment -> final verify
+resolve -> read -> validate -> plan -> confirm/dry-run -> mutate -> commit -> verify
 ```
 
-Bei Fehler stoppt der Batch. Frühere erfolgreiche ItemTypes bleiben committed.
+Backfill:
 
-## 15. Unassign
-
-```bash
-bin/cm-retention unassign AM --dry-run
-bin/cm-retention unassign AM
+```text
+plan/count
+ -> confirm
+ -> DB2 UPDATE
+ -> DB2 COMMIT
+ -> DB2 verify
+ -> IBM CM assign
+ -> reconnect/verify
+ -> final DB2 + policy verify
 ```
 
-Batch:
+Exit-Code `6` kennzeichnet insbesondere Fälle, in denen ein Teil bereits persistiert sein kann, die Abschlussprüfung aber nicht sauber war.
 
-```bash
-bin/cm-retention unassign --file itemtypes.txt --dry-run
-bin/cm-retention unassign --file itemtypes.txt
-```
+## 9. Build
 
-`--backfill` ist für `unassign` nicht zulässig.
-
-## 16. Delete
-
-Eine verwendete Policy wird nicht gelöscht.
-
-```bash
-bin/cm-retention delete AUTO_DELETE_1Y --dry-run
-bin/cm-retention delete AUTO_DELETE_1Y
-```
-
-## 17. Exit-Codes
-
-| Code | Bedeutung |
-|---:|---|
-| `0` | Erfolg / No change / erfolgreicher Dry-run |
-| `2` | CLI-, Konfigurations-, Preflight- oder Confirmation-Fehler |
-| `3` | IBM-CM-, DB2- oder Runtime-Fehler |
-| `4` | ItemType/Policy nicht gefunden |
-| `5` | unsichere/widersprüchliche Operation verweigert |
-| `6` | Verifikations-/Partial-Success-Zustand; Änderung kann bereits ganz oder teilweise persistiert sein |
-
-## 18. Recovery bei Exit 6 nach Backfill
-
-1. Keine weitere Bulk-Änderung blind starten.
-2. ItemType/Policy prüfen:
-
-```bash
-bin/cm-retention itemtype AM
-bin/cm-retention policy AUTO_DELETE_1Y
-```
-
-3. denselben Backfill erneut als Dry-run ausführen:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
-```
-
-4. Wenn DB2-Backfill bereits vollständig committed ist, sollten keine backfillbaren NULL-Zeilen mehr erscheinen.
-5. IBM-CM-Logs bei SDK-Fehlern prüfen.
-6. Ursache beheben und denselben idempotenten Backfill-Befehl erneut ausführen.
-
-## 19. Installation ohne Git
-
-Auf kompatiblem Build-Host:
+Auf einem IBM-CM-8.7-Host mit echter `cmbicmsdk81.jar`:
 
 ```bash
 ./build.sh
 ```
 
-Paket übertragen:
+Version 0.3.1 erzeugt:
 
 ```text
-build/cm-retention-0.3.0-runtime.tar.gz
+build/cm-retention.jar
+build/cm-retention-0.3.1.jar
+build/.version
+build/ret-policy.properties
+build/cm-retention-0.3.1-runtime.tar.gz
+build/SHA256SUMS-0.3.1
 ```
 
-Auf Zielhost:
+Das Runtime-TAR.GZ ist für Zielserver ohne Git/javac gedacht.
+
+## 10. Installation ohne Git
+
+Auf dem Build-Host:
 
 ```bash
-tar -xzf cm-retention-0.3.0-runtime.tar.gz
-cd cm-retention-0.3.0
+./build.sh
+```
+
+Dann übertragen:
+
+```text
+build/cm-retention-0.3.1-runtime.tar.gz
+```
+
+Auf dem Zielserver:
+
+```bash
+cd /home/ibmcmadm
+tar -xzf cm-retention-0.3.1-runtime.tar.gz
+cd cm-retention-0.3.1
 cp .env.example .env
 chmod 600 .env
 vi .env
@@ -488,12 +238,33 @@ bin/cm-retention doctor
 bin/cm-retention status
 ```
 
-Git und `javac` sind auf dem Zielhost nicht erforderlich.
+## 11. Empfohlene Abnahme
 
-## 20. Weitere Dokumente
+```bash
+bin/cm-retention version
+bin/cm-retention doctor
+bin/cm-retention status
+bin/cm-retention policies
+bin/cm-retention itemtypes
+bin/cm-retention create ZZ_TEST_1Y --dry-run
+```
 
-- `README.md` – Überblick und Installation
-- `docs/BACKFILL.md` – detaillierter Backfill-Ablauf
-- `docs/TROUBLESHOOTING.md` – Fehlerdiagnose
-- `docs/METADATA_REPAIR.md` – separates IBM-CM-Metadaten-Thema
-- `CHANGELOG.md` – Versionshistorie
+Im Create-Plan muss standardmäßig erscheinen:
+
+```text
+Expiration   : 1 year
+Force checkin: yes
+```
+
+und als Properties-Quelle die verwendete `ret-policy.properties`.
+
+## 12. Exit-Codes
+
+| Code | Bedeutung |
+|---:|---|
+| 0 | Erfolg / No-op / erfolgreicher Dry-run |
+| 2 | CLI-/Config-/Properties-/Preflight-Fehler |
+| 3 | IBM-CM-/DB2-Laufzeitfehler |
+| 4 | ItemType/Policy nicht gefunden |
+| 5 | unsichere oder widersprüchliche Operation verweigert |
+| 6 | Verifikationswarnung / Partial-Success-Situation |
