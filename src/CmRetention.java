@@ -1,14 +1,19 @@
 import com.ibm.mm.sdk.common.DKException;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
 public final class CmRetention {
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.3.3";
 
     private CmRetention() {}
 
-    public static void main(String[] args) {
+    public static void main(String[] rawArgs) {
         int exitCode = 0;
         CmService service = null;
         try {
+            String[] args = normalizeCreateTemplateArgs(rawArgs);
             if (CmCli.handleHelpOrVersionWithoutConfig(args)) {
                 return;
             }
@@ -44,6 +49,50 @@ public final class CmRetention {
         if (exitCode != 0) {
             System.exit(exitCode);
         }
+    }
+
+    /**
+     * Convenience syntax:
+     *
+     *   cm-retention create profiles/auto-delete-5y.properties --dry-run
+     *
+     * is normalized to the explicit, already-supported form:
+     *
+     *   cm-retention create --properties profiles/auto-delete-5y.properties --dry-run
+     *
+     * Detection is intentionally conservative: only the first create argument is
+     * considered, it must end in .properties, and it must already exist as a
+     * readable regular file. Explicit --properties always wins and is left alone.
+     */
+    private static String[] normalizeCreateTemplateArgs(String[] args) {
+        if (args == null || args.length < 2 || !"create".equals(args[0])) {
+            return args == null ? new String[0] : args;
+        }
+        for (String arg : args) {
+            if ("--properties".equals(arg)) {
+                return args;
+            }
+        }
+
+        String candidate = args[1];
+        if (candidate == null || candidate.startsWith("--")
+                || !candidate.toLowerCase(java.util.Locale.ROOT).endsWith(".properties")) {
+            return args;
+        }
+
+        Path path = Paths.get(candidate);
+        if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
+            return args;
+        }
+
+        String[] normalized = new String[args.length + 1];
+        normalized[0] = "create";
+        normalized[1] = "--properties";
+        normalized[2] = candidate;
+        if (args.length > 2) {
+            System.arraycopy(args, 2, normalized, 3, args.length - 2);
+        }
+        return normalized;
     }
 
     private static void printDkException(DKException e) {
