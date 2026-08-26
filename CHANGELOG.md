@@ -13,6 +13,7 @@ Automatic properties-template detection for policy creation:
 - explicit `--properties FILE` remains supported and is required when positional POLICY/AGE overrides are desired
 - classic `create POLICY AGE` behavior is unchanged
 - `create --help` now surfaces the shorthand syntax
+- corrected `auto-delete.max-duration` documentation and create-plan output: IBM CM interprets the value in seconds (`120` = 120 seconds), not minutes
 - bumped runtime/package version to `0.3.3`
 
 ## 0.3.2
