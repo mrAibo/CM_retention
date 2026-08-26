@@ -2,7 +2,7 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.3.1**
+Current version: **0.3.2**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no additional runtime dependencies beyond the existing IBM CM / DB2 runtime.
 
@@ -11,6 +11,8 @@ The project intentionally stays narrow: Java 8, the IBM CM SDK already installed
 - list and inspect retention policies
 - list and inspect ItemTypes
 - create fixed-time `AUTO_DELETE` policies
+- create a complete policy directly from a properties template
+- keep multiple reusable policy templates under `profiles/`
 - assign and unassign policies
 - process multiple ItemTypes with `--file`
 - preview writes with `--dry-run`
@@ -37,6 +39,7 @@ cm-retention itemtypes
 cm-retention itemtype [ITEMTYPE]
 
 cm-retention create [POLICY] [AGE]
+cm-retention create --properties FILE
 cm-retention assign [ITEMTYPE] [POLICY]
 cm-retention unassign [ITEMTYPE]
 cm-retention delete [POLICY]
@@ -52,11 +55,17 @@ Run without arguments in a terminal for the small interactive admin menu.
 
 ---
 
-# Policy defaults: `ret-policy.properties`
+# Policy templates and defaults
 
-Version 0.3.1 introduces a dedicated properties file for all policy parameters currently supported by `cm-retention`.
+Version 0.3.2 turns the properties file into a complete reusable policy template.
 
-Default file:
+Every actual properties template must contain:
+
+```properties
+RET_POLICY_NAME=...
+```
+
+The default template is:
 
 ```text
 ret-policy.properties
@@ -65,6 +74,8 @@ ret-policy.properties
 Default content:
 
 ```properties
+RET_POLICY_NAME=AUTO_DELETE_1Y
+
 retention.type=FIXED_TIME
 retention.enabled=false
 
@@ -81,43 +92,105 @@ auto-delete.force-checkin=true
 
 `auto-delete.force-checkin=true` corresponds to **"Einchecken vor Loeschen erzwingen"** and is intentionally enabled by default.
 
+## Create directly from a template
+
+No policy name or expiration argument is needed when the template contains them:
+
+```bash
+bin/cm-retention create \
+  --properties profiles/auto-delete-5y.properties \
+  --dry-run
+```
+
+Real creation:
+
+```bash
+bin/cm-retention create \
+  --properties profiles/auto-delete-5y.properties
+```
+
+Automation:
+
+```bash
+bin/cm-retention create \
+  --properties profiles/auto-delete-5y.properties \
+  --yes
+```
+
+The supplied file **must contain `RET_POLICY_NAME`**. A selected properties file without that key is rejected instead of silently inheriting another policy name.
+
+## Included templates
+
+The repository and runtime bundle contain:
+
+```text
+profiles/auto-delete-1y.properties
+profiles/auto-delete-5y.properties
+profiles/auto-delete-10y.properties
+```
+
+You can copy one of these and create any number of environment-specific policy templates.
+
+Example:
+
+```properties
+RET_POLICY_NAME=AUTO_DELETE_7Y_NIGHT
+retention.type=FIXED_TIME
+retention.enabled=false
+expiration.enabled=true
+expiration.age=7y
+expiration.action=AUTO_DELETE
+auto-delete.schedule=0 3 * * *
+auto-delete.commit-count=100
+auto-delete.max-items=5000
+auto-delete.max-duration=120
+auto-delete.force-checkin=true
+```
+
+Then:
+
+```bash
+bin/cm-retention create --properties profiles/auto-delete-7y-night.properties --dry-run
+```
+
 ## Precedence
 
 When creating a policy, values are resolved in this order:
 
 ```text
-explicit CLI option / positional AGE
+explicit CLI POLICY / AGE / options
         > --properties FILE
         > ret-policy.properties
         > built-in fallback
 ```
 
-This means:
+This gives two equally supported workflows.
+
+Template-first:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_1Y
+bin/cm-retention create --properties profiles/auto-delete-5y.properties
 ```
 
-uses the default `expiration.age=1y` from `ret-policy.properties`.
-
-The classic form still works and overrides the property:
+CLI-first:
 
 ```bash
 bin/cm-retention create AUTO_DELETE_5Y 5y
 ```
 
-Use another properties file:
+A positional policy name overrides `RET_POLICY_NAME` and a positional AGE overrides `expiration.age`:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y \
-  --properties /secure/custom-ret-policy.properties
+bin/cm-retention create TEMP_POLICY 30d \
+  --properties profiles/auto-delete-5y.properties \
+  --dry-run
 ```
 
-Explicit CLI options override the selected properties file:
+Explicit CLI options also override the selected properties file:
 
 ```bash
 bin/cm-retention create AUTO_DELETE_5Y 5y \
-  --properties /secure/custom-ret-policy.properties \
+  --properties profiles/auto-delete-5y.properties \
   --schedule "0 4 * * *" \
   --max-items 10000
 ```
@@ -147,7 +220,7 @@ expiration.enabled = true
 expiration.action  = AUTO_DELETE
 ```
 
-Unsupported semantic values are rejected rather than silently creating a different policy type.
+Unsupported semantic values and unknown property names are rejected rather than silently creating a different policy type.
 
 ---
 
@@ -227,13 +300,6 @@ bin/cm-retention --env .env.test status
 bin/cm-retention --env .env.prod status
 ```
 
-Normally `ret-policy.properties` is found automatically next to the selected `.env` / application directory. For a one-command override use the explicit switch:
-
-```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y \
-  --properties /secure/custom-ret-policy.properties
-```
-
 ---
 
 # Build
@@ -246,23 +312,27 @@ Run on a compatible IBM CM 8.7 build host:
 
 The version is read from `src/CmRetention.java` and written into the JAR manifest and `build/.version`.
 
-For version 0.3.1 the build creates:
+For version 0.3.2 the build creates:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.3.1.jar
+build/cm-retention-0.3.2.jar
 build/.version
 build/ret-policy.properties
-build/cm-retention-0.3.1-runtime.tar.gz
-build/SHA256SUMS-0.3.1
+build/profiles/auto-delete-1y.properties
+build/profiles/auto-delete-5y.properties
+build/profiles/auto-delete-10y.properties
+build/cm-retention-0.3.2-runtime.tar.gz
+build/SHA256SUMS-0.3.2
 ```
 
 Meaning:
 
 - `cm-retention.jar` - stable runtime filename used by the launcher
-- `cm-retention-0.3.1.jar` - immutable versioned JAR
+- `cm-retention-0.3.2.jar` - immutable versioned JAR
 - `.version` - exact compiled version
-- `ret-policy.properties` - copy of the packaged defaults
+- `ret-policy.properties` - default policy template
+- `profiles/` - reusable policy templates
 - `*-runtime.tar.gz` - transportable runtime package
 - `SHA256SUMS-*` - integrity checks when `sha256sum` is available
 
@@ -271,14 +341,15 @@ Verify:
 ```bash
 cat build/.version
 ls -lh build/cm-retention*.jar
+find build/profiles -maxdepth 1 -type f -name '*.properties' -print
 bin/cm-retention version
 ```
 
 Expected:
 
 ```text
-0.3.1
-cm-retention 0.3.1
+0.3.2
+cm-retention 0.3.2
 ```
 
 ## Deployment without Git
@@ -292,7 +363,7 @@ On the build host:
 Copy:
 
 ```text
-build/cm-retention-0.3.1-runtime.tar.gz
+build/cm-retention-0.3.2-runtime.tar.gz
 ```
 
 to the target server.
@@ -301,8 +372,8 @@ On the target:
 
 ```bash
 cd /home/ibmcmadm
-tar -xzf cm-retention-0.3.1-runtime.tar.gz
-cd cm-retention-0.3.1
+tar -xzf cm-retention-0.3.2-runtime.tar.gz
+cd cm-retention-0.3.2
 
 cp .env.example .env
 chmod 600 .env
@@ -316,25 +387,33 @@ bin/cm-retention status
 
 The target server does not need Git or `javac`.
 
-The runtime archive includes `ret-policy.properties` with `auto-delete.force-checkin=true`.
+The runtime archive includes both `ret-policy.properties` and `profiles/*.properties`.
 
 ---
 
 # Creating a policy
 
-Use the defaults from `ret-policy.properties`:
+The shortest template workflow is:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_1Y
+bin/cm-retention create --properties profiles/auto-delete-1y.properties --dry-run
 ```
 
-Dry-run first:
+If the plan is correct:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_1Y --dry-run
+bin/cm-retention create --properties profiles/auto-delete-1y.properties
 ```
 
-Specify another age directly:
+The default template can even be used with:
+
+```bash
+bin/cm-retention create --dry-run
+```
+
+because `ret-policy.properties` contains both `RET_POLICY_NAME` and `expiration.age`.
+
+The classic syntax remains available:
 
 ```bash
 bin/cm-retention create AUTO_DELETE_10Y 10y
