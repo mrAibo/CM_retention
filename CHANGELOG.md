@@ -2,6 +2,27 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.3.0
+
+Existing-item backfill workflow:
+
+- added explicit `assign ITEMTYPE POLICY --backfill`
+- added `assign --file ITEMTYPES.txt POLICY --backfill` for guarded multi-item backfill + assignment
+- backfill is performed before policy assignment and only updates rows where both `ICM$RETENTIONDATE` and `ICM$AUTODELETEDATE` are `NULL`
+- `ICM$AUTODELETEDATE` is calculated from `ICM$CREATETS + <policy expiration period>` using the actual FIXED_TIME policy duration/unit
+- root component/table is resolved automatically from `ICMSTCOMPDEFS` + `ICMSTITEMTYPEDEFS`; table names are never accepted from the CLI
+- dry-run reports total root rows, backfillable rows, NULL create timestamps, already dated rows and rows that would be immediately expired
+- backfill refuses non-FIXED_TIME policies, retention-enabled policies, non-AUTO_DELETE policies and non-positive expiration periods
+- backfill refuses a switch from a different already assigned policy to avoid mixed expiration dates
+- rows with NULL `ICM$CREATETS` cause a fail-safe stop before any update
+- SQL update is idempotent because only rows with both dates NULL are modified
+- DB2 backfill commits before the IBM CM policy assignment, then verifies no eligible NULL rows remain
+- final verification checks both the policy assignment and residual NULL rows
+- if backfill was committed but assignment/final verification is not clean, the launcher returns exit code `6`
+- added optional DB2 settings (`DB2_JDBC_URL`, `DB2_DATABASE`, `DB2_USER`, `DB2_PASSWORD`, `DB2_SCHEMA`, `DB2_JDBC_JAR`)
+- DB2 JDBC credentials remain in the protected `.env`; no password CLI option was added
+- bumped runtime/package version to `0.3.0`
+
 ## 0.2.1
 
 Batch/deployment update:
