@@ -109,9 +109,10 @@ final class CmCli {
         if (parsed.positional.size() > 2) {
             throw new CliException("Usage: cm-retention create [POLICY] [AGE] [options]", 2);
         }
-        String name = parsed.positional.size() >= 1 ? parsed.positional.get(0) : promptRequired("Policy name");
         String ageValue = parsed.positional.size() >= 2 ? parsed.positional.get(1) : null;
-        createPolicy(name, PolicySettings.from(parsed, ageValue), parsed);
+        PolicySettings settings = PolicySettings.from(parsed, ageValue);
+        String name = parsed.positional.size() >= 1 ? parsed.positional.get(0) : settings.policyName;
+        createPolicy(name, settings, parsed);
     }
 
     private void commandAssign(String[] args) throws Exception {
@@ -442,13 +443,16 @@ final class CmCli {
         System.out.println("  cm-retention status\n  cm-retention policies\n  cm-retention policy [POLICY]");
         System.out.println("  cm-retention itemtypes\n  cm-retention itemtype [ITEMTYPE]\n");
         System.out.println("Write:");
-        System.out.println("  cm-retention create [POLICY] [AGE]\n  cm-retention assign [ITEMTYPE] [POLICY]");
+        System.out.println("  cm-retention create [POLICY] [AGE]");
+        System.out.println("  cm-retention create --properties FILE");
+        System.out.println("  cm-retention assign [ITEMTYPE] [POLICY]");
         System.out.println("  cm-retention unassign [ITEMTYPE]\n  cm-retention delete [POLICY]\n");
         System.out.println("Diagnostics:\n  cm-retention doctor\n");
         System.out.println("General write flags:");
         System.out.println("  --yes       Skip interactive confirmation (required without a TTY)");
         System.out.println("  --dry-run   Validate and show the plan without changing IBM CM\n");
         System.out.println("Policy creation reads ret-policy.properties by default.");
+        System.out.println("A template selected with --properties FILE supplies RET_POLICY_NAME and expiration.age.");
         System.out.println("Use 'cm-retention create --help' for policy-property and advanced overrides.");
         System.out.println("Legacy 0.1.x command forms remain accepted with a warning.");
     }
@@ -464,9 +468,16 @@ final class CmCli {
     }
 
     private static void printCreateHelp() {
-        System.out.println("Usage: cm-retention create [POLICY] [AGE] [options]\n");
-        System.out.println("AGE examples: 1y, 12m, 52w, 365d");
-        System.out.println("If AGE is omitted, expiration.age from the policy properties is used.\n");
+        System.out.println("Usage: cm-retention create [POLICY] [AGE] [options]");
+        System.out.println("       cm-retention create --properties FILE [options]\n");
+        System.out.println("Template mode:");
+        System.out.println("  RET_POLICY_NAME in FILE supplies the policy name.");
+        System.out.println("  expiration.age in FILE supplies the expiration age.");
+        System.out.println("  Therefore no positional arguments are required with --properties FILE.\n");
+        System.out.println("CLI override mode:");
+        System.out.println("  POLICY overrides RET_POLICY_NAME.");
+        System.out.println("  AGE overrides expiration.age.");
+        System.out.println("  AGE examples: 1y, 12m, 52w, 365d.\n");
         System.out.println("Properties:");
         System.out.println("  default file      ret-policy.properties");
         System.out.println("  override file     --properties /path/to/custom.properties");
