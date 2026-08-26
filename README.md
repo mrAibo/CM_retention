@@ -53,6 +53,535 @@ CM Retention 0.2.0 | LSDB | icmadmin
 
 This is intentionally not a full-screen TUI. It is only a small prompt layer over the same scriptable command core.
 
+---
+
+# Installation
+
+This section describes a complete installation on an IBM Content Manager server, from cloning the repository to the first successful connection test.
+
+## 1. Prerequisites
+
+The tool is intended to run locally on a server where IBM Content Manager 8.7 is already installed.
+
+Typical paths used by the project:
+
+```text
+IBMCMROOT=/opt/IBM/db2cmv8
+JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
+```
+
+Required files/directories include:
+
+```text
+${IBMCMROOT}/lib/cmbicmsdk81.jar
+${IBMCMROOT}/lib/
+${IBMCMROOT}/cmgmt/
+${JAVA_HOME}/bin/java
+${JAVA_HOME}/bin/javac
+${JAVA_HOME}/bin/jar
+```
+
+The configured IBM CM library-server alias, for example `LSDB`, must already exist in the local IBM CM configuration.
+
+Recommended runtime user:
+
+```text
+ibmcmadm
+```
+
+Do not install or operate the tool as `root` unless this is explicitly required by your local administration model.
+
+Before installation, verify the main prerequisites:
+
+```bash
+ls -l /opt/IBM/db2cmv8/lib/cmbicmsdk81.jar
+/opt/IBM/WebSphere/AppServer/java/8.0/bin/java -version
+/opt/IBM/WebSphere/AppServer/java/8.0/bin/javac -version
+```
+
+## 2. Clone the repository
+
+As the intended runtime user:
+
+```bash
+cd /home/ibmcmadm
+
+git clone https://github.com/mrAibo/CM_retention.git
+cd CM_retention
+```
+
+Check the repository state:
+
+```bash
+git status
+git log -1 --oneline
+```
+
+For v0.2.x the source must report:
+
+```bash
+grep 'VERSION =' src/CmRetention.java
+```
+
+Expected:
+
+```text
+static final String VERSION = "0.2.0";
+```
+
+## 3. Choose the configuration model
+
+For a single environment, create `.env`:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Edit it:
+
+```bash
+vi .env
+```
+
+Example:
+
+```dotenv
+CM_DATABASE=LSDB
+CM_USER=icmadmin
+CM_PASSWORD=change-me
+IBMCMROOT=/opt/IBM/db2cmv8
+JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
+```
+
+Important:
+
+- `.env` is ignored by Git and must never be committed.
+- the password is not passed as a CLI argument.
+- the launcher refuses configuration files that are readable by group or other users.
+- use mode `0600` or stricter.
+
+Verify:
+
+```bash
+ls -l .env
+stat -c '%a %n' .env
+```
+
+Expected mode:
+
+```text
+600 .env
+```
+
+## 4. Recommended: separate TEST and PROD completely
+
+TEST and PROD should be treated as dedicated server configurations, not as one configuration file that is edited back and forth.
+
+Create separate files:
+
+```bash
+cp .env.example .env.test
+cp .env.example .env.prod
+chmod 600 .env.test .env.prod
+```
+
+Example TEST configuration:
+
+```dotenv
+CM_DATABASE=LSDB_TEST
+CM_USER=icmadmin
+CM_PASSWORD=<test-password>
+IBMCMROOT=/opt/IBM/db2cmv8
+JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
+```
+
+Example PROD configuration:
+
+```dotenv
+CM_DATABASE=LSDB
+CM_USER=icmadmin
+CM_PASSWORD=<prod-password>
+IBMCMROOT=/opt/IBM/db2cmv8
+JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
+```
+
+Use them explicitly:
+
+```bash
+bin/cm-retention --env .env.test status
+bin/cm-retention --env .env.prod status
+```
+
+A write can then be targeted clearly:
+
+```bash
+bin/cm-retention --env .env.test assign AM AUTO_DELETE_1Y --dry-run
+```
+
+For production, always verify the target first:
+
+```bash
+bin/cm-retention --env .env.prod status
+```
+
+before executing a write command.
+
+## 5. Build the tool
+
+From the repository root:
+
+```bash
+./build.sh
+```
+
+The build uses the locally installed IBM CM SDK and Java 8.
+
+It compiles all Java sources under:
+
+```text
+src/
+```
+
+and creates:
+
+```text
+build/cm-retention.jar
+build/.version
+```
+
+The JAR manifest contains:
+
+```text
+Main-Class: CmRetention
+Implementation-Version: 0.2.0
+```
+
+Check the build output:
+
+```bash
+ls -l build/cm-retention.jar build/.version
+cat build/.version
+```
+
+Expected version:
+
+```text
+0.2.0
+```
+
+## 6. Verify the installed version
+
+Run:
+
+```bash
+bin/cm-retention version
+```
+
+Expected:
+
+```text
+cm-retention 0.2.0
+```
+
+If you see an older version such as `0.1.2`, do not continue with administrative operations. Rebuild the tool as described in the update/troubleshooting section below.
+
+## 7. Run the first connection test
+
+The recommended first command is:
+
+```bash
+bin/cm-retention status
+```
+
+Typical output:
+
+```text
+CM Retention 0.2.0
+
+Configuration
+  File       : /home/ibmcmadm/CM_retention/.env
+  Database   : LSDB
+  User       : icmadmin
+
+Runtime
+  Java       : 1.8.0_xxx
+  IBM CM API : 8.7.x
+
+Content Manager
+  Connection : OK
+  Datastore  : LSDB
+  Policies   : ...
+  Item types : ...
+
+Status       : OK
+```
+
+Then run the deeper diagnostics:
+
+```bash
+bin/cm-retention doctor
+```
+
+`doctor` checks the launcher/runtime first and then the IBM CM connection/API.
+
+Among other things it validates:
+
+```text
+configuration file
+configuration permissions
+Java executable
+IBM CM SDK
+IBM CM native library path
+IBM CM configuration directory
+application JAR
+build version/freshness
+IBM CM login
+policy API
+item type API
+```
+
+## 8. Verify read-only commands before any write
+
+Run at least:
+
+```bash
+bin/cm-retention policies
+bin/cm-retention itemtypes
+```
+
+Inspect one real policy or item type:
+
+```bash
+bin/cm-retention policy AUTO_DELETE_1Y
+bin/cm-retention itemtype AM
+```
+
+Only after these commands return the expected environment/data should write operations be tested.
+
+## 9. First safe write test
+
+Use `--dry-run` first:
+
+```bash
+bin/cm-retention create ZZ_CM_RETENTION_TEST 1d --dry-run
+```
+
+or for an assignment:
+
+```bash
+bin/cm-retention assign AM AUTO_DELETE_1Y --dry-run
+```
+
+A dry-run performs validation and prints the intended plan but does not mutate IBM CM.
+
+For a real write in an interactive terminal:
+
+```bash
+bin/cm-retention assign AM AUTO_DELETE_1Y
+```
+
+The tool prints the plan and asks:
+
+```text
+Apply? [y/N]:
+```
+
+Only explicit `y` executes the change.
+
+For non-interactive automation, use `--yes`:
+
+```bash
+bin/cm-retention assign AM AUTO_DELETE_1Y --yes
+```
+
+## 10. Interactive installer alternative
+
+Instead of manually creating `.env` and building, a first installation can use:
+
+```bash
+./install.sh
+```
+
+The installer prompts for:
+
+```text
+IBM CM root
+Java home
+CM database
+CM user
+CM password
+```
+
+The password is read with hidden terminal input.
+
+The installer then:
+
+1. writes the configuration,
+2. applies mode `0600`,
+3. builds the JAR,
+4. runs the status/connection check.
+
+For environments with dedicated TEST/PROD files, manual configuration is usually clearer because the target file can be named explicitly.
+
+## 11. Updating an existing installation
+
+From the Git checkout:
+
+```bash
+cd /home/ibmcmadm/CM_retention
+
+git status
+git pull --ff-only
+./build.sh
+bin/cm-retention version
+bin/cm-retention status
+```
+
+Do **not** assume that `git pull` automatically rebuilds the Java JAR.
+
+The source files and the compiled JAR are separate. After a source update, always run:
+
+```bash
+./build.sh
+```
+
+The v0.2 launcher now detects stale builds and refuses to run them.
+
+Typical messages are:
+
+```text
+ERROR: build artifact predates v0.2.0 or is stale; run: .../build.sh
+```
+
+or:
+
+```text
+ERROR: source is newer than the application jar; run: .../build.sh
+```
+
+If you have upgraded from 0.1.x and want a completely clean rebuild:
+
+```bash
+git pull --ff-only
+rm -rf build
+./build.sh
+bin/cm-retention version
+```
+
+Expected:
+
+```text
+cm-retention 0.2.0
+```
+
+## 12. Detecting duplicate old installations
+
+If commands still behave like v0.1.x after updating, check whether multiple copies exist:
+
+```bash
+find /home/ibmcmadm -maxdepth 2 -type d \
+  \( -name 'cm-retention' -o -name 'CM_retention' \) \
+  -print
+```
+
+For each result, check:
+
+```bash
+cd /path/to/repository
+pwd
+bin/cm-retention version
+```
+
+A typical cause of confusion is having both:
+
+```text
+/home/ibmcmadm/cm-retention
+/home/ibmcmadm/CM_retention
+```
+
+where one directory contains the old 0.1.x installation and the other contains the current Git checkout.
+
+Also check which command is actually executed if a global command or symlink exists:
+
+```bash
+command -v cm-retention
+readlink -f "$(command -v cm-retention)" 2>/dev/null || true
+```
+
+## 13. Installation troubleshooting
+
+### `ERROR: configuration file not found`
+
+Create the file and secure it:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+vi .env
+```
+
+### `ERROR: insecure permissions`
+
+Fix permissions:
+
+```bash
+chmod 600 .env
+```
+
+or for dedicated environments:
+
+```bash
+chmod 600 .env.test .env.prod
+```
+
+### `ERROR: Java runtime not executable`
+
+Check `JAVA_HOME` in the configuration:
+
+```bash
+ls -l /opt/IBM/WebSphere/AppServer/java/8.0/bin/java
+```
+
+### `ERROR: IBM CM SDK not found`
+
+Check `IBMCMROOT` and the SDK:
+
+```bash
+ls -l /opt/IBM/db2cmv8/lib/cmbicmsdk81.jar
+```
+
+### `ERROR: tool is not built`
+
+Run:
+
+```bash
+./build.sh
+```
+
+### Old v0.1.x syntax appears after `git pull`
+
+Check:
+
+```bash
+pwd
+git rev-parse --short HEAD
+grep 'VERSION =' src/CmRetention.java
+bin/cm-retention version
+```
+
+Then perform a clean rebuild:
+
+```bash
+rm -rf build
+./build.sh
+bin/cm-retention version
+```
+
+If the version remains old, verify that you are in the correct checkout and not in a second legacy installation.
+
+---
+
 ## Quick examples
 
 List policies:
@@ -141,99 +670,6 @@ Important boundaries:
 - after problematic IBM CM item-type updates the tool reconnects and verifies the actual persisted state
 - exit code `6` preserves the important distinction between a clean success and a persisted change followed by a secondary IBM CM error
 - the service re-checks the current assignment immediately before mutation and refuses stale plans
-
-## Configuration
-
-Create the local configuration:
-
-```bash
-cp .env.example .env
-chmod 600 .env
-```
-
-Example:
-
-```dotenv
-CM_DATABASE=LSDB
-CM_USER=icmadmin
-CM_PASSWORD=change-me
-IBMCMROOT=/opt/IBM/db2cmv8
-JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
-```
-
-`.env` is ignored by Git and must not be committed.
-
-### Test and production
-
-Treat environments as separate server configurations. Do not reuse one `.env` by editing it back and forth.
-
-Example:
-
-```text
-.env.test
-.env.prod
-```
-
-```bash
-chmod 600 .env.test .env.prod
-
-bin/cm-retention --env .env.test status
-bin/cm-retention --env .env.prod status
-```
-
-A write can then be targeted explicitly:
-
-```bash
-bin/cm-retention --env .env.test assign AM AUTO_DELETE_1Y --dry-run
-```
-
-## Build
-
-Requirements:
-
-- IBM Content Manager 8.7 installed locally
-- Java 8 / `javac`
-- `${IBMCMROOT}/lib/cmbicmsdk81.jar`
-
-Build:
-
-```bash
-./build.sh
-```
-
-Output:
-
-```text
-build/cm-retention.jar
-```
-
-## Installer
-
-For an interactive first installation:
-
-```bash
-./install.sh
-```
-
-The installer prompts for IBM CM root, Java home, database, user and password, writes `.env` with mode `0600`, builds the tool and runs `status` as a connection test.
-
-The password is read with hidden terminal input and is not passed in argv.
-
-## Status and doctor
-
-Normal overview:
-
-```bash
-bin/cm-retention status
-```
-
-Deeper diagnostics:
-
-```bash
-bin/cm-retention doctor
-```
-
-`doctor` starts with launcher checks (configuration permissions, Java, IBM CM SDK, native library/config paths, application JAR) and then performs Java/IBM CM connection, policy-API and item-type-API checks.
 
 ## Advanced create options
 
