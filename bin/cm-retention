@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 APP_HOME=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 ENV_FILE=${CM_RETENTION_ENV:-${APP_HOME}/.env}
-EXPECTED_VERSION=0.2.0
 
 if [[ ${1:-} == "--env" ]]; then
     if [[ $# -lt 2 ]]; then
@@ -101,15 +100,21 @@ preflight_ok "CM configuration" "${IBMCMROOT}/cmgmt"
 
 JAR=${APP_HOME}/build/cm-retention.jar
 VERSION_FILE=${APP_HOME}/build/.version
+SOURCE_MAIN=${APP_HOME}/src/CmRetention.java
 [[ -f "$JAR" ]] || preflight_fail "application jar" "tool is not built: $JAR (run: ${APP_HOME}/build.sh)"
+[[ -f "$VERSION_FILE" ]] || preflight_fail "build version" "build version file is missing; rebuild or deploy a complete runtime bundle"
 
-if [[ ! -f "$VERSION_FILE" ]]; then
-    preflight_fail "build version" "build artifact predates v0.2.0 or is stale; run: ${APP_HOME}/build.sh"
-fi
 BUILT_VERSION=$(tr -d '[:space:]' < "$VERSION_FILE")
-if [[ "$BUILT_VERSION" != "$EXPECTED_VERSION" ]]; then
-    preflight_fail "build version" "stale build: expected $EXPECTED_VERSION but found ${BUILT_VERSION:-unknown}; run: ${APP_HOME}/build.sh"
+[[ -n "$BUILT_VERSION" ]] || preflight_fail "build version" "empty build version file: $VERSION_FILE"
+
+if [[ -f "$SOURCE_MAIN" ]]; then
+    EXPECTED_VERSION=$(sed -n 's/^[[:space:]]*static final String VERSION = "\([^"]*\)";[[:space:]]*$/\1/p' "$SOURCE_MAIN" | head -n 1)
+    [[ -n "$EXPECTED_VERSION" ]] || preflight_fail "source version" "unable to determine version from $SOURCE_MAIN"
+    if [[ "$BUILT_VERSION" != "$EXPECTED_VERSION" ]]; then
+        preflight_fail "build version" "stale build: source is $EXPECTED_VERSION but build is $BUILT_VERSION; run: ${APP_HOME}/build.sh"
+    fi
 fi
+
 preflight_ok "application jar" "$JAR"
 preflight_ok "build version" "$BUILT_VERSION"
 
@@ -131,5 +136,210 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 export CLASSPATH="${JAR}:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*${CLASSPATH:+:${CLASSPATH}}"
 export LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+run_java() {
+    "$JAVA" -cp "$CLASSPATH" CmRetention "$@"
+}
+
+trim_line() {
+    local value=$1
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+run_file_batch() {
+    local command=$1
+    shift
+
+    local file=""
+    local policy=""
+    local assume_yes=0
+    local dry_run=0
+    local -a positional=()
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --file)
+                [[ -z "$file" ]] || { echo "ERROR: duplicate option --file" >&2; return 2; }
+                [[ $# -ge 2 ]] || { echo "ERROR: --file requires a path" >&2; return 2; }
+                file=$2
+                shift 2
+                ;;
+            --yes)
+                [[ $assume_yes -eq 0 ]] || { echo "ERROR: duplicate flag --yes" >&2; return 2; }
+                assume_yes=1
+                shift
+                ;;
+            --dry-run)
+                [[ $dry_run -eq 0 ]] || { echo "ERROR: duplicate flag --dry-run" >&2; return 2; }
+                dry_run=1
+                shift
+                ;;
+            --*)
+                echo "ERROR: unknown batch option '$1'" >&2
+                return 2
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    [[ -n "$file" ]] || { echo "ERROR: --file is required for batch mode" >&2; return 2; }
+    [[ -f "$file" && -r "$file" ]] || { echo "ERROR: itemtype file is not readable: $file" >&2; return 2; }
+
+    if [[ "$command" == assign ]]; then
+        [[ ${#positional[@]} -eq 1 ]] || {
+            echo "ERROR: usage: cm-retention assign --file ITEMTYPES.txt POLICY [--dry-run|--yes]" >&2
+            return 2
+        }
+        policy=${positional[0]}
+    else
+        [[ ${#positional[@]} -eq 0 ]] || {
+            echo "ERROR: usage: cm-retention unassign --file ITEMTYPES.txt [--dry-run|--yes]" >&2
+            return 2
+        }
+    fi
+
+    local -a itemtypes=()
+    local line item existing duplicate
+    local lineno=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        lineno=$((lineno + 1))
+        item=$(trim_line "$line")
+        [[ -n "$item" ]] || continue
+        [[ "$item" == \#* ]] && continue
+
+        duplicate=0
+        for existing in "${itemtypes[@]}"; do
+            if [[ "$existing" == "$item" ]]; then
+                duplicate=1
+                break
+            fi
+        done
+        if [[ $duplicate -eq 1 ]]; then
+            echo "ERROR: duplicate itemtype '$item' in $file (line $lineno)" >&2
+            return 2
+        fi
+        itemtypes+=("$item")
+    done < "$file"
+
+    [[ ${#itemtypes[@]} -gt 0 ]] || { echo "ERROR: no itemtypes found in $file" >&2; return 2; }
+
+    echo "Batch mode"
+    echo "  Operation : $command"
+    echo "  File      : $file"
+    echo "  Item types: ${#itemtypes[@]}"
+    if [[ "$command" == assign ]]; then
+        echo "  Policy    : $policy"
+    fi
+    echo
+    echo "Phase 1/2: validating every item type (no changes)"
+    echo
+
+    local index=0 rc
+    for item in "${itemtypes[@]}"; do
+        index=$((index + 1))
+        echo "--- [$index/${#itemtypes[@]}] $item ---"
+        if [[ "$command" == assign ]]; then
+            if run_java assign "$item" "$policy" --dry-run; then
+                :
+            else
+                rc=$?
+                echo "ERROR: batch validation failed for '$item'. No batch changes were made." >&2
+                return "$rc"
+            fi
+        else
+            if run_java unassign "$item" --dry-run; then
+                :
+            else
+                rc=$?
+                echo "ERROR: batch validation failed for '$item'. No batch changes were made." >&2
+                return "$rc"
+            fi
+        fi
+        echo
+    done
+
+    echo "Validation: OK (${#itemtypes[@]} item types)"
+
+    if [[ $dry_run -eq 1 ]]; then
+        echo "DRY RUN: batch validation complete. No changes made."
+        return 0
+    fi
+
+    echo
+    echo "NOTE: batch execution is sequential, not atomic."
+    echo "If a runtime error occurs, processing stops immediately, but earlier successful changes remain committed."
+
+    if [[ $assume_yes -eq 0 ]]; then
+        if [[ ! -t 0 ]]; then
+            echo "ERROR: batch write refused without --yes when no terminal is attached" >&2
+            return 2
+        fi
+        local answer
+        read -r -p "Apply batch to ${#itemtypes[@]} item types? [y/N]: " answer
+        if [[ ! "$answer" =~ ^([yY]|[yY][eE][sS])$ ]]; then
+            echo "Cancelled. No changes made."
+            return 0
+        fi
+    fi
+
+    echo
+    echo "Phase 2/2: applying changes"
+    echo
+
+    local completed=0
+    index=0
+    for item in "${itemtypes[@]}"; do
+        index=$((index + 1))
+        echo "--- [$index/${#itemtypes[@]}] $item ---"
+        if [[ "$command" == assign ]]; then
+            if run_java assign "$item" "$policy" --yes; then
+                completed=$((completed + 1))
+            else
+                rc=$?
+                echo "ERROR: batch stopped at '$item' after $completed successful item(s)." >&2
+                echo "Earlier successful changes remain committed; review status before retrying." >&2
+                return "$rc"
+            fi
+        else
+            if run_java unassign "$item" --yes; then
+                completed=$((completed + 1))
+            else
+                rc=$?
+                echo "ERROR: batch stopped at '$item' after $completed successful item(s)." >&2
+                echo "Earlier successful changes remain committed; review status before retrying." >&2
+                return "$rc"
+            fi
+        fi
+        echo
+    done
+
+    echo "Batch complete: $completed/${#itemtypes[@]} item types processed successfully."
+}
+
+HAS_FILE=0
+for arg in "$@"; do
+    if [[ "$arg" == --file ]]; then
+        HAS_FILE=1
+        break
+    fi
+done
+
+if [[ $HAS_FILE -eq 1 ]]; then
+    case ${1:-} in
+        assign|unassign)
+            run_file_batch "$@"
+            exit $?
+            ;;
+        *)
+            echo "ERROR: --file is supported only for assign and unassign" >&2
+            exit 2
+            ;;
+    esac
+fi
 
 exec "$JAVA" -cp "$CLASSPATH" CmRetention "$@"
