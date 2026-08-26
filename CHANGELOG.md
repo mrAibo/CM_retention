@@ -2,6 +2,23 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.2.1
+
+Batch/deployment update:
+
+- added `--file` batch mode for `assign` and `unassign`
+- batch files use one exact ItemType name per line, ignore blanks/comments, and reject duplicates
+- all batch entries are validated via normal Java dry-run before the first mutation
+- real batch execution is sequential, fail-fast, and deliberately non-atomic
+- retained the single-item reconnect/persisted-state verification and exit code `6` for every batch item
+- `build.sh` now derives the version from `CmRetention.VERSION`
+- build now creates both `cm-retention.jar` and immutable `cm-retention-<VERSION>.jar`
+- build writes `build/.version`
+- build now creates `cm-retention-<VERSION>-runtime.tar.gz` for deployment to servers without Git or `javac`
+- runtime bundle contains launcher, compiled JAR, example configuration and documentation, but no IBM proprietary SDK/runtime libraries or credentials
+- build now creates SHA-256 checksums for the versioned JAR and runtime archive when `sha256sum` is available
+- launcher version checks now work for both source installations and precompiled runtime bundles
+
 ## 0.2.0
 
 Admin CLI and safety refactor:
