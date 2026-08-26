@@ -61,6 +61,8 @@ auto-delete.max-duration=120
 auto-delete.force-checkin=true
 ```
 
+Wichtig: `auto-delete.max-duration` wird in **Sekunden** angegeben. `120` bedeutet also 120 Sekunden bzw. 2 Minuten, nicht 120 Minuten.
+
 `auto-delete.force-checkin=true` bedeutet: **Einchecken vor Löschen erzwingen**.
 
 ### Empfohlene Kurzform
@@ -161,8 +163,11 @@ Ein einzelner CLI-Override gewinnt gegen die Properties:
 ```bash
 bin/cm-retention create profiles/auto-delete-5y.properties \
   --schedule "0 4 * * *" \
-  --max-items 10000
+  --max-items 10000 \
+  --max-duration 180
 ```
+
+Auch `--max-duration` verwendet Sekunden; `180` entspricht 3 Minuten.
 
 Default Force-Checkin deaktivieren:
 
@@ -346,6 +351,7 @@ Im Create-Plan muss erscheinen:
 ```text
 Name         : AUTO_DELETE_1Y
 Expiration   : 1 year
+Limits       : 5000 items / 120 sec
 Force checkin: yes
 ```
 
