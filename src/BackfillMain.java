@@ -30,21 +30,17 @@ public final class BackfillMain {
             if ("plan".equals(action)) {
                 BackfillPlan plan = backfill.plan(itemType, policy, current, policyName);
                 printPlan(plan);
-                if (plan.missingCreateTimestampRows > 0) {
-                    throw new CliException("Backfill refused: " + plan.missingCreateTimestampRows
-                            + " row(s) have NULL ICM$CREATETS.", 5);
-                }
+                validatePlan(plan);
             } else if ("apply".equals(action)) {
                 BackfillPlan plan = backfill.plan(itemType, policy, current, policyName);
                 printApplyHeader(plan);
-                if (plan.missingCreateTimestampRows > 0) {
-                    throw new CliException("Backfill refused: " + plan.missingCreateTimestampRows
-                            + " row(s) have NULL ICM$CREATETS.", 5);
-                }
+                validatePlan(plan);
                 BackfillResult result = backfill.apply(plan);
                 System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
                 System.out.println("Remaining NULL rows: " + result.remainingRows);
             } else if ("verify".equals(action)) {
+                BackfillPlan plan = backfill.plan(itemType, policy, current, policyName);
+                validateSegment(plan);
                 long remaining = backfill.remainingMissing(itemType, policy, current, policyName);
                 if (remaining != 0) {
                     throw new CliException("Backfill verification failed: " + remaining
@@ -61,9 +57,9 @@ public final class BackfillMain {
             rc = e.exitCode;
         } catch (SQLException e) {
             System.err.println("DB2 ERROR");
-            System.err.println("Message:   " + e.getMessage());
-            System.err.println("SQL state: " + e.getSQLState());
-            System.err.println("Error code:" + e.getErrorCode());
+            System.err.println("Message:    " + e.getMessage());
+            System.err.println("SQL state:  " + e.getSQLState());
+            System.err.println("Error code: " + e.getErrorCode());
             rc = 3;
         } catch (DKException e) {
             System.err.println("IBM CM ERROR");
@@ -83,6 +79,22 @@ public final class BackfillMain {
         if (rc != 0) System.exit(rc);
     }
 
+    private static void validatePlan(BackfillPlan plan) {
+        validateSegment(plan);
+        if (plan.missingCreateTimestampRows > 0) {
+            throw new CliException("Backfill refused: " + plan.missingCreateTimestampRows
+                    + " row(s) have NULL ICM$CREATETS.", 5);
+        }
+    }
+
+    private static void validateSegment(BackfillPlan plan) {
+        if (plan.segmentId != 1) {
+            throw new CliException("Backfill refused: ItemType uses component SegmentID "
+                    + plan.segmentId + ". Multi-segment backfill is not implemented; refusing"
+                    + " to update only one segment.", 5);
+        }
+    }
+
     private static void printPlan(BackfillPlan plan) {
         System.out.println("Existing-item backfill plan\n");
         System.out.println("Item type                 : " + plan.itemTypeName);
@@ -90,6 +102,7 @@ public final class BackfillMain {
         System.out.println("Target policy             : " + plan.policyName);
         System.out.println("ItemType ID               : " + plan.itemTypeId);
         System.out.println("Root component ID         : " + plan.componentTypeId);
+        System.out.println("Component SegmentID       : " + plan.segmentId);
         System.out.println("Root table                : " + plan.tableName);
         System.out.println("Expiration                : " + plan.expirationAmount + " " + plan.expirationUnit);
         System.out.println("Formula                   : ICM$AUTODELETEDATE = ICM$CREATETS + " + plan.durationSql);
