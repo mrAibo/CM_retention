@@ -134,11 +134,39 @@ export IBMCMROOT JAVA_HOME
 if [[ -f "$ENV_FILE" ]]; then
     export CM_RETENTION_ENV_FILE="$ENV_FILE"
 fi
-export CLASSPATH="${JAR}:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*${CLASSPATH:+:${CLASSPATH}}"
+
+# Optional DB2 JCC driver used by the explicit --backfill workflow.
+DB2_JDBC_JAR=$(read_env_value DB2_JDBC_JAR "$ENV_FILE")
+if [[ -n "$DB2_JDBC_JAR" ]]; then
+    [[ -f "$DB2_JDBC_JAR" ]] || preflight_fail "DB2 JDBC driver" "DB2_JDBC_JAR does not exist: $DB2_JDBC_JAR"
+else
+    for candidate in \
+        "${IBMCMROOT}/lib/db2jcc4.jar" \
+        "${IBMCMROOT}/lib/db2jcc.jar" \
+        "/opt/IBM/db2/V11.5/java/db2jcc4.jar" \
+        "/opt/ibm/db2/V11.5/java/db2jcc4.jar"; do
+        if [[ -f "$candidate" ]]; then
+            DB2_JDBC_JAR=$candidate
+            break
+        fi
+    done
+fi
+
+EXTRA_CP=""
+if [[ -n "$DB2_JDBC_JAR" ]]; then
+    EXTRA_CP=":${DB2_JDBC_JAR}"
+    preflight_ok "DB2 JDBC driver" "$DB2_JDBC_JAR"
+fi
+
+export CLASSPATH="${JAR}:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*${EXTRA_CP}${CLASSPATH:+:${CLASSPATH}}"
 export LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 run_java() {
     "$JAVA" -cp "$CLASSPATH" CmRetention "$@"
+}
+
+run_backfill() {
+    "$JAVA" -cp "$CLASSPATH" BackfillMain "$@"
 }
 
 trim_line() {
@@ -146,6 +174,121 @@ trim_line() {
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
     printf '%s' "$value"
+}
+
+approve_batch_or_single() {
+    local assume_yes=$1
+    local prompt=$2
+    if [[ $assume_yes -eq 1 ]]; then
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        echo "ERROR: write refused without --yes when no terminal is attached" >&2
+        return 2
+    fi
+    local answer
+    read -r -p "$prompt [y/N]: " answer
+    if [[ ! "$answer" =~ ^([yY]|[yY][eE][sS])$ ]]; then
+        echo "Cancelled. No changes made."
+        return 1
+    fi
+    return 0
+}
+
+apply_backfill_assignment() {
+    local item=$1 policy=$2
+    local assign_rc=0 verify_rc=0
+
+    local backfill_rc=0
+    if run_backfill apply "$item" "$policy"; then
+        backfill_rc=0
+    else
+        backfill_rc=$?
+        return "$backfill_rc"
+    fi
+
+    if run_java assign "$item" "$policy" --yes; then
+        assign_rc=0
+    else
+        assign_rc=$?
+    fi
+
+    if run_backfill verify "$item" "$policy"; then
+        verify_rc=0
+    else
+        verify_rc=$?
+    fi
+
+    if [[ $assign_rc -ne 0 || $verify_rc -ne 0 ]]; then
+        echo "WARNING: backfill was committed, but assignment/final verification was not a clean success." >&2
+        echo "Review the itemtype and rerun the same --backfill command after resolving the cause." >&2
+        return 6
+    fi
+    return 0
+}
+
+run_single_backfill_assign() {
+    local assume_yes=0 dry_run=0 seen_backfill=0
+    local -a positional=()
+
+    shift # assign
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --backfill)
+                [[ $seen_backfill -eq 0 ]] || { echo "ERROR: duplicate flag --backfill" >&2; return 2; }
+                seen_backfill=1
+                shift
+                ;;
+            --yes)
+                [[ $assume_yes -eq 0 ]] || { echo "ERROR: duplicate flag --yes" >&2; return 2; }
+                assume_yes=1
+                shift
+                ;;
+            --dry-run)
+                [[ $dry_run -eq 0 ]] || { echo "ERROR: duplicate flag --dry-run" >&2; return 2; }
+                dry_run=1
+                shift
+                ;;
+            --*)
+                echo "ERROR: unknown backfill option '$1'" >&2
+                return 2
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    [[ $seen_backfill -eq 1 ]] || { echo "ERROR: internal backfill parser error" >&2; return 2; }
+    [[ ${#positional[@]} -eq 2 ]] || {
+        echo "ERROR: usage: cm-retention assign ITEMTYPE POLICY --backfill [--dry-run|--yes]" >&2
+        return 2
+    }
+
+    local item=${positional[0]}
+    local policy=${positional[1]}
+
+    run_backfill plan "$item" "$policy" || return $?
+
+    if [[ $dry_run -eq 1 ]]; then
+        echo
+        echo "DRY RUN: backfill and assignment were validated. No changes made."
+        return 0
+    fi
+
+    echo
+    echo "IMPORTANT: existing rows whose calculated date is already in the past become immediately eligible for AUTO_DELETE after policy assignment."
+    if approve_batch_or_single "$assume_yes" "Backfill existing rows and assign $policy to $item?"; then
+        :
+    else
+        local approval_rc=$?
+        [[ $approval_rc -eq 1 ]] && return 0
+        return "$approval_rc"
+    fi
+
+    echo
+    apply_backfill_assignment "$item" "$policy"
 }
 
 run_file_batch() {
@@ -156,6 +299,7 @@ run_file_batch() {
     local policy=""
     local assume_yes=0
     local dry_run=0
+    local backfill=0
     local -a positional=()
 
     while [[ $# -gt 0 ]]; do
@@ -165,6 +309,11 @@ run_file_batch() {
                 [[ $# -ge 2 ]] || { echo "ERROR: --file requires a path" >&2; return 2; }
                 file=$2
                 shift 2
+                ;;
+            --backfill)
+                [[ $backfill -eq 0 ]] || { echo "ERROR: duplicate flag --backfill" >&2; return 2; }
+                backfill=1
+                shift
                 ;;
             --yes)
                 [[ $assume_yes -eq 0 ]] || { echo "ERROR: duplicate flag --yes" >&2; return 2; }
@@ -192,11 +341,12 @@ run_file_batch() {
 
     if [[ "$command" == assign ]]; then
         [[ ${#positional[@]} -eq 1 ]] || {
-            echo "ERROR: usage: cm-retention assign --file ITEMTYPES.txt POLICY [--dry-run|--yes]" >&2
+            echo "ERROR: usage: cm-retention assign --file ITEMTYPES.txt POLICY [--backfill] [--dry-run|--yes]" >&2
             return 2
         }
         policy=${positional[0]}
     else
+        [[ $backfill -eq 0 ]] || { echo "ERROR: --backfill is supported only with assign" >&2; return 2; }
         [[ ${#positional[@]} -eq 0 ]] || {
             echo "ERROR: usage: cm-retention unassign --file ITEMTYPES.txt [--dry-run|--yes]" >&2
             return 2
@@ -234,6 +384,7 @@ run_file_batch() {
     echo "  Item types: ${#itemtypes[@]}"
     if [[ "$command" == assign ]]; then
         echo "  Policy    : $policy"
+        echo "  Backfill  : $([[ $backfill -eq 1 ]] && echo yes || echo no)"
     fi
     echo
     echo "Phase 1/2: validating every item type (no changes)"
@@ -244,12 +395,22 @@ run_file_batch() {
         index=$((index + 1))
         echo "--- [$index/${#itemtypes[@]}] $item ---"
         if [[ "$command" == assign ]]; then
-            if run_java assign "$item" "$policy" --dry-run; then
-                :
+            if [[ $backfill -eq 1 ]]; then
+                if run_backfill plan "$item" "$policy"; then
+                    :
+                else
+                    rc=$?
+                    echo "ERROR: batch backfill validation failed for '$item'. No batch changes were made." >&2
+                    return "$rc"
+                fi
             else
-                rc=$?
-                echo "ERROR: batch validation failed for '$item'. No batch changes were made." >&2
-                return "$rc"
+                if run_java assign "$item" "$policy" --dry-run; then
+                    :
+                else
+                    rc=$?
+                    echo "ERROR: batch validation failed for '$item'. No batch changes were made." >&2
+                    return "$rc"
+                fi
             fi
         else
             if run_java unassign "$item" --dry-run; then
@@ -273,18 +434,16 @@ run_file_batch() {
     echo
     echo "NOTE: batch execution is sequential, not atomic."
     echo "If a runtime error occurs, processing stops immediately, but earlier successful changes remain committed."
+    if [[ $backfill -eq 1 ]]; then
+        echo "Each itemtype is processed as: DB2 backfill -> verify -> policy assignment -> final verify."
+    fi
 
-    if [[ $assume_yes -eq 0 ]]; then
-        if [[ ! -t 0 ]]; then
-            echo "ERROR: batch write refused without --yes when no terminal is attached" >&2
-            return 2
-        fi
-        local answer
-        read -r -p "Apply batch to ${#itemtypes[@]} item types? [y/N]: " answer
-        if [[ ! "$answer" =~ ^([yY]|[yY][eE][sS])$ ]]; then
-            echo "Cancelled. No changes made."
-            return 0
-        fi
+    if approve_batch_or_single "$assume_yes" "Apply batch to ${#itemtypes[@]} item types?"; then
+        :
+    else
+        local approval_rc=$?
+        [[ $approval_rc -eq 1 ]] && return 0
+        return "$approval_rc"
     fi
 
     echo
@@ -297,13 +456,24 @@ run_file_batch() {
         index=$((index + 1))
         echo "--- [$index/${#itemtypes[@]}] $item ---"
         if [[ "$command" == assign ]]; then
-            if run_java assign "$item" "$policy" --yes; then
-                completed=$((completed + 1))
+            if [[ $backfill -eq 1 ]]; then
+                if apply_backfill_assignment "$item" "$policy"; then
+                    completed=$((completed + 1))
+                else
+                    rc=$?
+                    echo "ERROR: batch stopped at '$item' after $completed fully verified item(s)." >&2
+                    echo "Earlier successful changes remain committed; the current item may have a committed backfill." >&2
+                    return "$rc"
+                fi
             else
-                rc=$?
-                echo "ERROR: batch stopped at '$item' after $completed successful item(s)." >&2
-                echo "Earlier successful changes remain committed; review status before retrying." >&2
-                return "$rc"
+                if run_java assign "$item" "$policy" --yes; then
+                    completed=$((completed + 1))
+                else
+                    rc=$?
+                    echo "ERROR: batch stopped at '$item' after $completed successful item(s)." >&2
+                    echo "Earlier successful changes remain committed; review status before retrying." >&2
+                    return "$rc"
+                fi
             fi
         else
             if run_java unassign "$item" --yes; then
@@ -322,11 +492,10 @@ run_file_batch() {
 }
 
 HAS_FILE=0
+HAS_BACKFILL=0
 for arg in "$@"; do
-    if [[ "$arg" == --file ]]; then
-        HAS_FILE=1
-        break
-    fi
+    [[ "$arg" == --file ]] && HAS_FILE=1
+    [[ "$arg" == --backfill ]] && HAS_BACKFILL=1
 done
 
 if [[ $HAS_FILE -eq 1 ]]; then
@@ -340,6 +509,15 @@ if [[ $HAS_FILE -eq 1 ]]; then
             exit 2
             ;;
     esac
+fi
+
+if [[ $HAS_BACKFILL -eq 1 ]]; then
+    if [[ ${1:-} != assign ]]; then
+        echo "ERROR: --backfill is supported only for the top-level assign command" >&2
+        exit 2
+    fi
+    run_single_backfill_assign "$@"
+    exit $?
 fi
 
 exec "$JAVA" -cp "$CLASSPATH" CmRetention "$@"
