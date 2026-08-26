@@ -55,6 +55,45 @@ cm-retention assign --file ITEMTYPES.txt POLICY --backfill
 
 Run without arguments in a terminal for the small interactive admin menu.
 
+## Inspecting policy usage
+
+A compact policy list is available with:
+
+```bash
+bin/cm-retention policies
+```
+
+The `ITEMTYPES` column shows how many ItemTypes currently use each policy.
+
+For a single policy, use:
+
+```bash
+bin/cm-retention policy POLICY
+```
+
+Example:
+
+```bash
+bin/cm-retention policy AUTO_DELETE_5Y
+```
+
+In addition to the policy parameters, the command prints the exact ItemTypes currently assigned to that policy:
+
+```text
+Assigned itemtypes:         3
+  - AM
+  - CONTRACT
+  - INVOICE
+```
+
+If the policy is unused, the output is:
+
+```text
+Assigned itemtypes:         0
+```
+
+The ItemType names are sorted alphabetically. This is useful before changing or deleting a policy.
+
 ---
 
 # Policy templates
