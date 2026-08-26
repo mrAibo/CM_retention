@@ -81,6 +81,7 @@ final class BackfillService {
 
         Connection connection = connect();
         boolean committed = false;
+        int updated = 0;
         try {
             connection.setAutoCommit(false);
             String table = qualified(plan.tableName);
@@ -91,7 +92,6 @@ final class BackfillService {
                     + " AND ICM$CREATETS IS NOT NULL";
 
             Statement statement = connection.createStatement();
-            int updated;
             try {
                 updated = statement.executeUpdate(sql);
             } finally {
@@ -111,8 +111,14 @@ final class BackfillService {
             }
             return new BackfillResult(updated, remaining);
         } catch (SQLException e) {
-            if (!committed) rollbackQuietly(connection);
-            throw e;
+            if (!committed) {
+                rollbackQuietly(connection);
+                throw e;
+            }
+            throw new CliException("Backfill DB2 COMMIT completed for " + updated
+                    + " row(s), but post-commit verification failed (SQLSTATE "
+                    + safeSqlState(e) + "): " + safeSqlMessage(e)
+                    + ". Policy assignment was not started; verify DB2 state before retrying.", 6);
         } finally {
             closeQuietly(connection);
         }
@@ -246,6 +252,15 @@ final class BackfillService {
         if (unit == DK_ICM_POLICY_TIME_UNIT.WEEK) return "WEEK";
         if (unit == DK_ICM_POLICY_TIME_UNIT.DAY) return "DAY";
         throw new CliException("Unsupported expiration unit for DB2 backfill: " + unit, 5);
+    }
+
+    private static String safeSqlState(SQLException e) {
+        return e.getSQLState() == null ? "unknown" : e.getSQLState();
+    }
+
+    private static String safeSqlMessage(SQLException e) {
+        return e.getMessage() == null || e.getMessage().trim().isEmpty()
+                ? e.getClass().getName() : e.getMessage();
     }
 
     private static void rollbackQuietly(Connection connection) {
