@@ -2,7 +2,9 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-It intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, one launcher, no GUI, no external CLI framework and no additional runtime dependencies.
+Current version: **0.2.1**
+
+The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, one launcher, no GUI, no external CLI framework and no additional runtime dependencies.
 
 ## What it does
 
@@ -11,6 +13,7 @@ It intentionally stays narrow: Java 8, the IBM CM SDK already installed on the s
 - list and inspect item types
 - create fixed-time `AUTO_DELETE` expiration policies
 - assign and unassign a policy to an item type
+- safely process multiple item types from a file with `--file`
 - delete an unused policy
 - show environment/connection status
 - run local + IBM CM diagnostics with `doctor`
@@ -18,7 +21,7 @@ It intentionally stays narrow: Java 8, the IBM CM SDK already installed on the s
 
 It does **not** delete documents directly, run `deleteExpiredItems()`, backfill existing items, or modify IBM CM system tables.
 
-## v0.2 CLI
+## CLI
 
 ```text
 cm-retention
@@ -29,59 +32,52 @@ cm-retention itemtypes
 cm-retention itemtype [ITEMTYPE]
 cm-retention create [POLICY] [AGE]
 cm-retention assign [ITEMTYPE] [POLICY]
+cm-retention assign --file ITEMTYPES.txt POLICY
 cm-retention unassign [ITEMTYPE]
+cm-retention unassign --file ITEMTYPES.txt
 cm-retention delete [POLICY]
 cm-retention doctor
 ```
 
-Run without arguments for the interactive admin mode:
-
-```text
-CM Retention 0.2.0 | LSDB | icmadmin
-
-  1  Policies
-  2  Item types
-  3  Create policy
-  4  Assign policy
-  5  Unassign policy
-  6  Delete policy
-  7  Status
-  8  Doctor
-
-  q  Quit
-```
-
-This is intentionally not a full-screen TUI. It is only a small prompt layer over the same scriptable command core.
+Run without arguments for the interactive admin mode.
 
 ---
 
 # Installation
 
-This section describes a complete installation on an IBM Content Manager server, from cloning the repository to the first successful connection test.
+There are two supported deployment models:
 
-## 1. Prerequisites
+1. **Build from source on an IBM CM host**.
+2. **Deploy a precompiled runtime bundle** to a target server that has no Git and does not need `javac`.
 
-The tool is intended to run locally on a server where IBM Content Manager 8.7 is already installed.
+The second model is recommended when TEST/PROD servers are tightly controlled.
 
-Typical paths used by the project:
+## 1. Runtime prerequisites
+
+The target server must already have a compatible IBM Content Manager 8.7 installation and Java 8.
+
+Typical paths:
 
 ```text
 IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ```
 
-Required files/directories include:
+Required at runtime:
 
 ```text
 ${IBMCMROOT}/lib/cmbicmsdk81.jar
 ${IBMCMROOT}/lib/
 ${IBMCMROOT}/cmgmt/
 ${JAVA_HOME}/bin/java
+```
+
+Required only when building from source:
+
+```text
 ${JAVA_HOME}/bin/javac
 ${JAVA_HOME}/bin/jar
 ```
-
-The configured IBM CM library-server alias, for example `LSDB`, must already exist in the local IBM CM configuration.
 
 Recommended runtime user:
 
@@ -89,58 +85,29 @@ Recommended runtime user:
 ibmcmadm
 ```
 
-Do not install or operate the tool as `root` unless this is explicitly required by your local administration model.
+The configured CM library-server alias, for example `LSDB`, must already exist in the local IBM CM configuration.
 
-Before installation, verify the main prerequisites:
+---
 
-```bash
-ls -l /opt/IBM/db2cmv8/lib/cmbicmsdk81.jar
-/opt/IBM/WebSphere/AppServer/java/8.0/bin/java -version
-/opt/IBM/WebSphere/AppServer/java/8.0/bin/javac -version
-```
+# A. Build from source
 
-## 2. Clone the repository
+## A1. Obtain the source
 
-As the intended runtime user:
+With Git:
 
 ```bash
 cd /home/ibmcmadm
-
 git clone https://github.com/mrAibo/CM_retention.git
 cd CM_retention
 ```
 
-Check the repository state:
+If Git is not installed, download the repository ZIP on another workstation, transfer it to the CM host and extract it there. Git is not required by `build.sh`.
 
-```bash
-git status
-git log -1 --oneline
-```
-
-For v0.2.x the source must report:
-
-```bash
-grep 'VERSION =' src/CmRetention.java
-```
-
-Expected:
-
-```text
-static final String VERSION = "0.2.0";
-```
-
-## 3. Choose the configuration model
-
-For a single environment, create `.env`:
+## A2. Create configuration
 
 ```bash
 cp .env.example .env
 chmod 600 .env
-```
-
-Edit it:
-
-```bash
 vi .env
 ```
 
@@ -154,56 +121,152 @@ IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ```
 
-Important:
+The launcher refuses configuration files that are readable by group or other users.
 
-- `.env` is ignored by Git and must never be committed.
-- the password is not passed as a CLI argument.
-- the launcher refuses configuration files that are readable by group or other users.
-- use mode `0600` or stricter.
+## A3. Build
+
+```bash
+./build.sh
+```
+
+The version is read directly from `src/CmRetention.java`, compiled into the JAR manifest and written into the build directory.
+
+For version `0.2.1` the build produces:
+
+```text
+build/cm-retention.jar
+build/cm-retention-0.2.1.jar
+build/.version
+build/cm-retention-0.2.1-runtime.tar.gz
+build/SHA256SUMS-0.2.1
+```
+
+Meaning:
+
+- `cm-retention.jar` — stable runtime filename used by the launcher
+- `cm-retention-0.2.1.jar` — immutable versioned JAR
+- `.version` — exact compiled version
+- `*-runtime.tar.gz` — transportable no-Git runtime package
+- `SHA256SUMS-*` — checksums for the versioned JAR and runtime archive when `sha256sum` is available
 
 Verify:
 
 ```bash
-ls -l .env
-stat -c '%a %n' .env
+cat build/.version
+ls -lh build/cm-retention*.jar build/*runtime.tar.gz
 ```
 
-Expected mode:
+Expected:
 
 ```text
-600 .env
+0.2.1
 ```
 
-## 4. Recommended: separate TEST and PROD completely
+## A4. Test the freshly built version
 
-TEST and PROD should be treated as dedicated server configurations, not as one configuration file that is edited back and forth.
+```bash
+bin/cm-retention version
+bin/cm-retention doctor
+bin/cm-retention status
+bin/cm-retention policies
+bin/cm-retention itemtypes
+```
 
-Create separate files:
+Only after the read-only checks succeed should a write or batch operation be tested.
+
+---
+
+# B. Precompiled deployment without Git
+
+This is the recommended workflow when the target CM server has **no Git**.
+
+## B1. Build once on a compatible IBM CM 8.7 host
+
+On a build/test CM host containing the real IBM SDK:
+
+```bash
+./build.sh
+```
+
+Use the resulting archive:
+
+```text
+build/cm-retention-0.2.1-runtime.tar.gz
+```
+
+The runtime archive intentionally does **not** contain IBM proprietary SDK/runtime libraries and does not contain credentials. It contains only the compiled application, launcher, example configuration and documentation.
+
+For best compatibility, build against the same IBM CM 8.7 level/fix pack used by the target servers.
+
+## B2. Copy the runtime package to the target
+
+For example:
+
+```bash
+scp build/cm-retention-0.2.1-runtime.tar.gz \
+    ibmcmadm@TARGET:/home/ibmcmadm/
+```
+
+Any approved internal file-transfer method can be used instead of `scp`.
+
+## B3. Extract on the target
+
+```bash
+cd /home/ibmcmadm
+tar -xzf cm-retention-0.2.1-runtime.tar.gz
+cd cm-retention-0.2.1
+```
+
+No Git checkout is needed and no Java compiler is needed on the target.
+
+## B4. Configure
+
+```bash
+cp .env.example .env
+chmod 600 .env
+vi .env
+```
+
+Then verify:
+
+```bash
+cat build/.version
+bin/cm-retention version
+bin/cm-retention doctor
+bin/cm-retention status
+```
+
+Expected:
+
+```text
+cm-retention 0.2.1
+```
+
+## B5. Verify checksums before transfer/deployment
+
+On the build host:
+
+```bash
+cd build
+sha256sum -c SHA256SUMS-0.2.1
+```
+
+This verifies the immutable JAR and runtime archive.
+
+---
+
+# Separate TEST and PROD configurations
+
+TEST and PROD should be treated as dedicated server configurations.
+
+Do not edit one shared `.env` back and forth.
+
+Example:
 
 ```bash
 cp .env.example .env.test
 cp .env.example .env.prod
 chmod 600 .env.test .env.prod
-```
-
-Example TEST configuration:
-
-```dotenv
-CM_DATABASE=LSDB_TEST
-CM_USER=icmadmin
-CM_PASSWORD=<test-password>
-IBMCMROOT=/opt/IBM/db2cmv8
-JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
-```
-
-Example PROD configuration:
-
-```dotenv
-CM_DATABASE=LSDB
-CM_USER=icmadmin
-CM_PASSWORD=<prod-password>
-IBMCMROOT=/opt/IBM/db2cmv8
-JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ```
 
 Use them explicitly:
@@ -213,376 +276,111 @@ bin/cm-retention --env .env.test status
 bin/cm-retention --env .env.prod status
 ```
 
-A write can then be targeted clearly:
-
-```bash
-bin/cm-retention --env .env.test assign AM AUTO_DELETE_1Y --dry-run
-```
-
-For production, always verify the target first:
-
-```bash
-bin/cm-retention --env .env.prod status
-```
-
-before executing a write command.
-
-## 5. Build the tool
-
-From the repository root:
-
-```bash
-./build.sh
-```
-
-The build uses the locally installed IBM CM SDK and Java 8.
-
-It compiles all Java sources under:
-
-```text
-src/
-```
-
-and creates:
-
-```text
-build/cm-retention.jar
-build/.version
-```
-
-The JAR manifest contains:
-
-```text
-Main-Class: CmRetention
-Implementation-Version: 0.2.0
-```
-
-Check the build output:
-
-```bash
-ls -l build/cm-retention.jar build/.version
-cat build/.version
-```
-
-Expected version:
-
-```text
-0.2.0
-```
-
-## 6. Verify the installed version
-
-Run:
-
-```bash
-bin/cm-retention version
-```
-
-Expected:
-
-```text
-cm-retention 0.2.0
-```
-
-If you see an older version such as `0.1.2`, do not continue with administrative operations. Rebuild the tool as described in the update/troubleshooting section below.
-
-## 7. Run the first connection test
-
-The recommended first command is:
-
-```bash
-bin/cm-retention status
-```
-
-Typical output:
-
-```text
-CM Retention 0.2.0
-
-Configuration
-  File       : /home/ibmcmadm/CM_retention/.env
-  Database   : LSDB
-  User       : icmadmin
-
-Runtime
-  Java       : 1.8.0_xxx
-  IBM CM API : 8.7.x
-
-Content Manager
-  Connection : OK
-  Datastore  : LSDB
-  Policies   : ...
-  Item types : ...
-
-Status       : OK
-```
-
-Then run the deeper diagnostics:
-
-```bash
-bin/cm-retention doctor
-```
-
-`doctor` checks the launcher/runtime first and then the IBM CM connection/API.
-
-Among other things it validates:
-
-```text
-configuration file
-configuration permissions
-Java executable
-IBM CM SDK
-IBM CM native library path
-IBM CM configuration directory
-application JAR
-build version/freshness
-IBM CM login
-policy API
-item type API
-```
-
-## 8. Verify read-only commands before any write
-
-Run at least:
-
-```bash
-bin/cm-retention policies
-bin/cm-retention itemtypes
-```
-
-Inspect one real policy or item type:
-
-```bash
-bin/cm-retention policy AUTO_DELETE_1Y
-bin/cm-retention itemtype AM
-```
-
-Only after these commands return the expected environment/data should write operations be tested.
-
-## 9. First safe write test
-
-Use `--dry-run` first:
-
-```bash
-bin/cm-retention create ZZ_CM_RETENTION_TEST 1d --dry-run
-```
-
-or for an assignment:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --dry-run
-```
-
-A dry-run performs validation and prints the intended plan but does not mutate IBM CM.
-
-For a real write in an interactive terminal:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y
-```
-
-The tool prints the plan and asks:
-
-```text
-Apply? [y/N]:
-```
-
-Only explicit `y` executes the change.
-
-For non-interactive automation, use `--yes`:
-
-```bash
-bin/cm-retention assign AM AUTO_DELETE_1Y --yes
-```
-
-## 10. Interactive installer alternative
-
-Instead of manually creating `.env` and building, a first installation can use:
-
-```bash
-./install.sh
-```
-
-The installer prompts for:
-
-```text
-IBM CM root
-Java home
-CM database
-CM user
-CM password
-```
-
-The password is read with hidden terminal input.
-
-The installer then:
-
-1. writes the configuration,
-2. applies mode `0600`,
-3. builds the JAR,
-4. runs the status/connection check.
-
-For environments with dedicated TEST/PROD files, manual configuration is usually clearer because the target file can be named explicitly.
-
-## 11. Updating an existing installation
-
-From the Git checkout:
-
-```bash
-cd /home/ibmcmadm/CM_retention
-
-git status
-git pull --ff-only
-./build.sh
-bin/cm-retention version
-bin/cm-retention status
-```
-
-Do **not** assume that `git pull` automatically rebuilds the Java JAR.
-
-The source files and the compiled JAR are separate. After a source update, always run:
-
-```bash
-./build.sh
-```
-
-The v0.2 launcher now detects stale builds and refuses to run them.
-
-Typical messages are:
-
-```text
-ERROR: build artifact predates v0.2.0 or is stale; run: .../build.sh
-```
-
-or:
-
-```text
-ERROR: source is newer than the application jar; run: .../build.sh
-```
-
-If you have upgraded from 0.1.x and want a completely clean rebuild:
-
-```bash
-git pull --ff-only
-rm -rf build
-./build.sh
-bin/cm-retention version
-```
-
-Expected:
-
-```text
-cm-retention 0.2.0
-```
-
-## 12. Detecting duplicate old installations
-
-If commands still behave like v0.1.x after updating, check whether multiple copies exist:
-
-```bash
-find /home/ibmcmadm -maxdepth 2 -type d \
-  \( -name 'cm-retention' -o -name 'CM_retention' \) \
-  -print
-```
-
-For each result, check:
-
-```bash
-cd /path/to/repository
-pwd
-bin/cm-retention version
-```
-
-A typical cause of confusion is having both:
-
-```text
-/home/ibmcmadm/cm-retention
-/home/ibmcmadm/CM_retention
-```
-
-where one directory contains the old 0.1.x installation and the other contains the current Git checkout.
-
-Also check which command is actually executed if a global command or symlink exists:
-
-```bash
-command -v cm-retention
-readlink -f "$(command -v cm-retention)" 2>/dev/null || true
-```
-
-## 13. Installation troubleshooting
-
-### `ERROR: configuration file not found`
-
-Create the file and secure it:
-
-```bash
-cp .env.example .env
-chmod 600 .env
-vi .env
-```
-
-### `ERROR: insecure permissions`
-
-Fix permissions:
-
-```bash
-chmod 600 .env
-```
-
-or for dedicated environments:
-
-```bash
-chmod 600 .env.test .env.prod
-```
-
-### `ERROR: Java runtime not executable`
-
-Check `JAVA_HOME` in the configuration:
-
-```bash
-ls -l /opt/IBM/WebSphere/AppServer/java/8.0/bin/java
-```
-
-### `ERROR: IBM CM SDK not found`
-
-Check `IBMCMROOT` and the SDK:
-
-```bash
-ls -l /opt/IBM/db2cmv8/lib/cmbicmsdk81.jar
-```
-
-### `ERROR: tool is not built`
-
-Run:
-
-```bash
-./build.sh
-```
-
-### Old v0.1.x syntax appears after `git pull`
-
-Check:
-
-```bash
-pwd
-git rev-parse --short HEAD
-grep 'VERSION =' src/CmRetention.java
-bin/cm-retention version
-```
-
-Then perform a clean rebuild:
-
-```bash
-rm -rf build
-./build.sh
-bin/cm-retention version
-```
-
-If the version remains old, verify that you are in the correct checkout and not in a second legacy installation.
+Always run `status` against PROD before a write.
 
 ---
 
-## Quick examples
+# Safe batch mode with `--file`
+
+`--file` is supported for **assign** and **unassign** only.
+
+It is intended for controlled administration of multiple item types while preserving the single-item verification logic.
+
+## File format
+
+One exact IBM CM ItemType name per line:
+
+```text
+# retention migration wave 1
+INVOICE
+CONTRACT
+CUSTOMER_DOC
+
+# blank lines are ignored
+MAIL_ARCHIVE
+```
+
+Rules:
+
+- one ItemType per line
+- leading/trailing whitespace is removed
+- empty lines are ignored
+- lines beginning with `#` are comments
+- ItemType names must be exact; no prefix matching is used in files
+- duplicate ItemTypes are rejected before any change
+
+## Assign one policy to all ItemTypes in a file
+
+Always start with dry-run:
+
+```bash
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_5Y --dry-run
+```
+
+Interactive execution:
+
+```bash
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_5Y
+```
+
+The tool validates **every** ItemType first. Only when all validations succeed does it offer the batch confirmation:
+
+```text
+Apply batch to 4 item types? [y/N]:
+```
+
+Non-interactive execution:
+
+```bash
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_5Y --yes
+```
+
+## Unassign all ItemTypes in a file
+
+Dry-run:
+
+```bash
+bin/cm-retention unassign --file itemtypes.txt --dry-run
+```
+
+Interactive:
+
+```bash
+bin/cm-retention unassign --file itemtypes.txt
+```
+
+Automation:
+
+```bash
+bin/cm-retention unassign --file itemtypes.txt --yes
+```
+
+## Batch safety model
+
+The batch has two phases:
+
+```text
+Phase 1: validate every ItemType with the normal Java dry-run
+Phase 2: execute each validated ItemType sequentially
+```
+
+If Phase 1 fails, **no batch change is started**.
+
+Batch execution is deliberately **not atomic**. IBM CM changes are committed and verified item by item. If an error occurs during Phase 2:
+
+- processing stops immediately
+- no later ItemTypes are touched
+- earlier successful ItemTypes remain committed
+- the command returns the failing item's exit code
+- the administrator must review current state before retrying
+
+This design keeps the existing reconnect/persisted-state verification and exit-code `6` semantics for every individual ItemType.
+
+There is intentionally no `--continue-on-error` option.
+
+---
+
+# Normal examples
 
 List policies:
 
@@ -590,69 +388,60 @@ List policies:
 bin/cm-retention policies
 ```
 
-Inspect one policy:
+Inspect a policy:
 
 ```bash
 bin/cm-retention policy AUTO_DELETE_5Y
 ```
 
-Create a five-year auto-delete policy using the safe defaults:
+Create a policy:
 
 ```bash
 bin/cm-retention create AUTO_DELETE_5Y 5y
 ```
 
-The default policy settings are:
-
-```text
-schedule       daily 02:00 (0 2 * * *)
-commit count   100
-max items      5000
-max duration   120 minutes
-force check-in false
-```
-
-Assign it:
+Assign one ItemType:
 
 ```bash
 bin/cm-retention assign INVOICE AUTO_DELETE_5Y
 ```
 
-Preview the operation without changing IBM CM:
+Preview first:
 
 ```bash
 bin/cm-retention assign INVOICE AUTO_DELETE_5Y --dry-run
 ```
 
-For non-interactive automation, `--yes` is required:
+For non-interactive automation:
 
 ```bash
 bin/cm-retention assign INVOICE AUTO_DELETE_5Y --yes
 ```
 
-## Interactive vs. automation
+---
 
-The CLI deliberately treats humans and scripts differently.
+# Interactive vs automation
 
-**Interactive terminal**
+Interactive terminal:
 
-- missing item type / policy arguments are offered as a numbered selection
-- exact and unambiguous prefix matching is available while selecting
-- every real write prints its plan first
-- every write defaults to **No**: `[y/N]`
+- missing single-item arguments can be selected interactively
+- exact/unambiguous prefix matching is available in the interactive selector
+- every write defaults to **No** (`[y/N]`)
 
-**non-TTY / cron / pipeline**
+Non-TTY / cron / pipeline:
 
-- all required identifiers must be supplied explicitly
-- identifiers must match exactly; no prefix matching is performed
+- required identifiers must be explicit
+- exact names only
 - real writes require `--yes`
-- `--dry-run` does not require `--yes`
+- `--dry-run` never requires `--yes`
 
-This prevents a cron job from waiting for input and keeps automation deterministic.
+File batches follow the same rule: interactive confirmation or `--yes`.
 
-## Safety model
+---
 
-Every write follows the same model:
+# Safety model
+
+Every single write follows:
 
 ```text
 resolve -> read current state -> validate -> print plan
@@ -661,25 +450,74 @@ resolve -> read current state -> validate -> print plan
 
 Important boundaries:
 
-- policy assignment is idempotent: assigning the already active policy returns success with `No change`
-- unassigning an item type without a policy is also a successful no-op
+- assign/unassign are idempotent
 - an assigned policy cannot be deleted
-- existing documents are **not** retroactively backfilled when a policy is assigned
-- passwords are read from `.env` / environment, never from a command-line password option
-- unknown options are rejected instead of being silently ignored
-- after problematic IBM CM item-type updates the tool reconnects and verifies the actual persisted state
-- exit code `6` preserves the important distinction between a clean success and a persisted change followed by a secondary IBM CM error
-- the service re-checks the current assignment immediately before mutation and refuses stale plans
+- existing documents are not retroactively backfilled
+- passwords are never accepted as a CLI password argument
+- unknown options are rejected
+- stale plans are refused
+- after problematic IBM CM ItemType updates, the tool reconnects and reads the real persisted state
+- exit code `6` means the requested state may already be persisted although IBM CM reported a secondary error
 
-## Advanced create options
+---
 
-The happy path is deliberately short:
+# Status and doctor
 
 ```bash
-bin/cm-retention create RET_10Y 10y
+bin/cm-retention status
+bin/cm-retention doctor
 ```
 
-Only unusual environments normally need overrides:
+The launcher also validates that source and compiled version match on a source installation. A stale JAR is refused instead of silently starting an old CLI.
+
+A precompiled runtime package uses `build/.version` as its deployment version and does not require source files.
+
+---
+
+# Updating
+
+## Source installation with Git
+
+```bash
+git pull --ff-only
+./build.sh
+bin/cm-retention version
+bin/cm-retention status
+```
+
+`git pull` does not rebuild Java automatically.
+
+## Server without Git
+
+Build a new runtime archive on the build host and replace the extracted runtime directory on the target with the new versioned directory.
+
+Do not overwrite an old directory blindly. Keeping versioned directories makes rollback simple:
+
+```text
+/home/ibmcmadm/cm-retention-0.2.0
+/home/ibmcmadm/cm-retention-0.2.1
+```
+
+Copy the existing `.env` only after verifying ownership and mode, then run `doctor` and `status` before use.
+
+---
+
+# Exit codes
+
+| Code | Meaning |
+|---:|---|
+| `0` | success / no change / successful dry-run |
+| `2` | CLI, configuration, preflight, file-format or confirmation error |
+| `3` | IBM CM / runtime operation error |
+| `4` | requested ItemType or policy not found |
+| `5` | unsafe/conflicting operation or stale state |
+| `6` | verification warning/failure; requested state may already be persisted despite a secondary IBM CM error |
+
+Batch mode stops on the first non-zero item result and returns that result.
+
+---
+
+# Advanced create options
 
 ```bash
 bin/cm-retention create RET_10Y 10y \
@@ -689,45 +527,21 @@ bin/cm-retention create RET_10Y 10y \
   --max-duration 180
 ```
 
-Show the complete create help:
+Show complete help:
 
 ```bash
 bin/cm-retention create --help
 ```
 
-## Exit codes
+---
 
-| Code | Meaning |
-|---:|---|
-| `0` | success / no change / successful dry-run |
-| `2` | CLI, configuration, preflight or confirmation error |
-| `3` | IBM CM / runtime operation error |
-| `4` | requested item type or policy not found |
-| `5` | unsafe/conflicting operation, e.g. policy already exists, is still assigned, or the displayed state changed before mutation |
-| `6` | verification warning/failure; requested state may already be persisted despite a secondary IBM CM error |
+# Compatibility with 0.1.x
 
-Scripts should always inspect the return code, especially `6`.
+Legacy command forms remain accepted with a deprecation warning. New scripts should use the top-level v0.2 commands.
 
-## Compatibility with 0.1.x
+---
 
-The old command forms remain accepted in 0.2.0 with a deprecation warning:
-
-```bash
-cm-retention connection test
-cm-retention itemtype list
-cm-retention itemtype show NAME
-cm-retention itemtype assign ITEMTYPE POLICY --yes
-cm-retention itemtype unassign ITEMTYPE --yes
-cm-retention policy list
-cm-retention policy show POLICY
-cm-retention policy usage POLICY
-cm-retention policy create POLICY --expiration 1y --yes
-cm-retention policy delete POLICY --yes
-```
-
-New scripts should use the v0.2 top-level commands.
-
-## Documentation
+# Documentation
 
 - [Detailed operations guide](DOKUMENTATION.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
