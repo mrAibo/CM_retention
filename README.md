@@ -85,6 +85,8 @@ auto-delete.max-duration=120
 auto-delete.force-checkin=true
 ```
 
+`auto-delete.max-duration` is expressed in **seconds**. For example, `120` means 120 seconds (2 minutes), not 120 minutes.
+
 `auto-delete.force-checkin=true` corresponds to **"Einchecken vor Löschen erzwingen"** and is intentionally enabled by default.
 
 The repository and runtime bundle contain:
@@ -203,6 +205,8 @@ bin/cm-retention create profiles/auto-delete-5y.properties \
   --max-items 10000 \
   --max-duration 180
 ```
+
+`--max-duration` is also in seconds, so `--max-duration 180` means 3 minutes.
 
 Force-checkin can be changed for one create operation:
 
