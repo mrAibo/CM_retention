@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ENV_FILE=${CM_RETENTION_ENV:-${ROOT}/.env}
+APP_VERSION=0.2.0
 
 read_env_value() {
     local key=$1 file=$2
@@ -51,8 +52,9 @@ cat > "${ROOT}/build/manifest.mf" <<MANIFEST
 Manifest-Version: 1.0
 Main-Class: CmRetention
 Implementation-Title: cm-retention
-Implementation-Version: 0.2.0
+Implementation-Version: ${APP_VERSION}
 MANIFEST
 
 "$JAR" cfm "${ROOT}/build/cm-retention.jar" "${ROOT}/build/manifest.mf" -C "${ROOT}/build/classes" .
-printf 'Built: %s\n' "${ROOT}/build/cm-retention.jar"
+printf '%s\n' "$APP_VERSION" > "${ROOT}/build/.version"
+printf 'Built: %s (version %s)\n' "${ROOT}/build/cm-retention.jar" "$APP_VERSION"
