@@ -85,6 +85,11 @@ final class PolicyDefaults {
                 } catch (IOException e) {
                     throw new CliException("Cannot read policy properties file " + path + ": " + e.getMessage(), 2);
                 }
+                if (!loaded.containsKey("RET_POLICY_NAME")
+                        || loaded.getProperty("RET_POLICY_NAME") == null
+                        || loaded.getProperty("RET_POLICY_NAME").trim().isEmpty()) {
+                    throw new CliException("Missing required policy property 'RET_POLICY_NAME' in " + path, 2);
+                }
                 for (String key : loaded.stringPropertyNames()) {
                     if (!ALLOWED_KEYS.contains(key)) {
                         throw new CliException("Unknown policy property '" + key + "' in " + path, 2);
