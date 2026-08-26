@@ -47,12 +47,16 @@ command -v tar >/dev/null 2>&1 || { echo "ERROR: tar is required to create the r
 rm -rf "${BUILD_DIR}/classes" "${BUILD_DIR}/runtime" "${BUILD_DIR}/profiles"
 mkdir -p "${BUILD_DIR}/classes"
 
+# Keep useful Java warnings enabled, but suppress auxiliaryclass only. The
+# project intentionally groups a few package-private helper classes in source
+# files; javac otherwise emits the same harmless warning for every cross-file use.
 "$JAVAC" \
     -encoding UTF-8 \
     -source 1.8 \
     -target 1.8 \
     -Xlint:all \
     -Xlint:-path \
+    -Xlint:-auxiliaryclass \
     -cp "${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*" \
     -d "${BUILD_DIR}/classes" \
     "${ROOT}/src/"*.java
@@ -74,6 +78,33 @@ cp -f "${ROOT}/ret-policy.properties" "${BUILD_DIR}/ret-policy.properties"
 mkdir -p "${BUILD_DIR}/profiles"
 cp -f "${ROOT}/profiles/"*.properties "${BUILD_DIR}/profiles/"
 
+# Always produce an environment example in build/. This makes source copies
+# made without hidden dotfiles buildable as well (common with SCP/manual copy).
+BUILD_ENV_EXAMPLE="${BUILD_DIR}/.env.example"
+if [[ -f "${ROOT}/.env.example" ]]; then
+    cp -f "${ROOT}/.env.example" "$BUILD_ENV_EXAMPLE"
+else
+    echo "WARNING: ${ROOT}/.env.example is missing; generating ${BUILD_ENV_EXAMPLE}" >&2
+    cat > "$BUILD_ENV_EXAMPLE" <<'ENVEXAMPLE'
+# IBM Content Manager connection alias from cmbicmsrvs.ini
+CM_DATABASE=LSDB
+CM_USER=icmadmin
+CM_PASSWORD=CHANGE_ME
+
+# Local IBM CM and Java installations
+IBMCMROOT=/opt/IBM/db2cmv8
+JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
+
+# Optional DB2 settings used only by explicit --backfill operations.
+# DB2_DATABASE=LSDB
+# DB2_JDBC_URL=jdbc:db2:LSDB
+# DB2_USER=icmadmin
+# DB2_PASSWORD=CHANGE_ME
+# DB2_SCHEMA=ICMADMIN
+# DB2_JDBC_JAR=/opt/IBM/db2/V11.5/java/db2jcc4.jar
+ENVEXAMPLE
+fi
+
 # Build a transportable runtime bundle. It intentionally contains no IBM SDK
 # or credentials; those are supplied by the target IBM CM installation.
 RUNTIME_NAME="cm-retention-${APP_VERSION}"
@@ -88,7 +119,7 @@ cp "$VERSIONED_JAR" "${RUNTIME_STAGE}/build/"
 cp "${BUILD_DIR}/.version" "${RUNTIME_STAGE}/build/.version"
 cp "${ROOT}/ret-policy.properties" "${RUNTIME_STAGE}/ret-policy.properties"
 cp "${ROOT}/profiles/"*.properties "${RUNTIME_STAGE}/profiles/"
-cp "${ROOT}/.env.example" "${RUNTIME_STAGE}/.env.example"
+cp "$BUILD_ENV_EXAMPLE" "${RUNTIME_STAGE}/.env.example"
 cp "${ROOT}/README.md" "${ROOT}/DOKUMENTATION.md" "${ROOT}/CHANGELOG.md" "${RUNTIME_STAGE}/"
 cp "${ROOT}/docs/"*.md "${RUNTIME_STAGE}/docs/"
 
@@ -119,7 +150,7 @@ Installation:
 
 Create directly from a template, for example:
 
-  bin/cm-retention create --properties profiles/auto-delete-5y.properties --dry-run
+  bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
 
 For separate TEST/PROD targets use separate .env.test/.env.prod files and
 invoke them explicitly with --env.
@@ -147,6 +178,7 @@ printf 'Versioned JAR:  %s\n' "$VERSIONED_JAR"
 printf 'Version file:   %s\n' "${BUILD_DIR}/.version"
 printf 'Policy config:  %s\n' "${BUILD_DIR}/ret-policy.properties"
 printf 'Policy profiles:%s\n' " ${BUILD_DIR}/profiles/"
+printf 'Env example:    %s\n' "$BUILD_ENV_EXAMPLE"
 printf 'Runtime bundle: %s\n' "$RUNTIME_TAR"
 if [[ -f "$CHECKSUM_FILE" ]]; then
     printf 'Checksums:      %s\n' "$CHECKSUM_FILE"
