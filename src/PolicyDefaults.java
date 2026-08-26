@@ -10,6 +10,7 @@ import java.util.Set;
 
 /** Policy defaults loaded from ret-policy.properties or an explicit override file. */
 final class PolicyDefaults {
+    static final String DEFAULT_POLICY_NAME = "AUTO_DELETE_1Y";
     static final String DEFAULT_EXPIRATION_AGE = "1y";
     static final String DEFAULT_SCHEDULE = "0 2 * * *";
     static final int DEFAULT_COMMIT_COUNT = 100;
@@ -18,6 +19,7 @@ final class PolicyDefaults {
     static final boolean DEFAULT_FORCE_CHECKIN = true;
 
     private static final Set<String> ALLOWED_KEYS = new HashSet<String>(Arrays.asList(
+            "RET_POLICY_NAME",
             "retention.type",
             "retention.enabled",
             "expiration.enabled",
@@ -31,6 +33,7 @@ final class PolicyDefaults {
     ));
 
     final String source;
+    final String policyName;
     final String expirationAge;
     final String schedule;
     final int commitCount;
@@ -38,10 +41,11 @@ final class PolicyDefaults {
     final int maxDuration;
     final boolean forceCheckin;
 
-    private PolicyDefaults(String source, String expirationAge, String schedule,
+    private PolicyDefaults(String source, String policyName, String expirationAge, String schedule,
                            int commitCount, int maxItems, int maxDuration,
                            boolean forceCheckin) {
         this.source = source;
+        this.policyName = policyName;
         this.expirationAge = expirationAge;
         this.schedule = schedule;
         this.commitCount = commitCount;
@@ -93,6 +97,7 @@ final class PolicyDefaults {
 
         validateSemanticMode(properties, source);
 
+        String policyName = required(properties, "RET_POLICY_NAME", source);
         String expirationAge = required(properties, "expiration.age", source);
         Age.parse(expirationAge);
         String schedule = required(properties, "auto-delete.schedule", source);
@@ -105,7 +110,7 @@ final class PolicyDefaults {
         boolean forceCheckin = booleanValue(required(properties, "auto-delete.force-checkin", source),
                 "auto-delete.force-checkin", source);
 
-        return new PolicyDefaults(source, expirationAge, schedule,
+        return new PolicyDefaults(source, policyName, expirationAge, schedule,
                 commitCount, maxItems, maxDuration, forceCheckin);
     }
 
@@ -123,6 +128,7 @@ final class PolicyDefaults {
 
     private static Properties builtinProperties() {
         Properties properties = new Properties();
+        properties.setProperty("RET_POLICY_NAME", DEFAULT_POLICY_NAME);
         properties.setProperty("retention.type", "FIXED_TIME");
         properties.setProperty("retention.enabled", "false");
         properties.setProperty("expiration.enabled", "true");
