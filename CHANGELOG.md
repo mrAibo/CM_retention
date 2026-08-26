@@ -2,6 +2,19 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.3.3
+
+Automatic properties-template detection for policy creation:
+
+- `cm-retention create FILE.properties` now auto-detects a readable properties template and internally normalizes it to the existing `--properties FILE` workflow
+- the shorthand also works when normal create flags come before or after the template, for example `create --dry-run profiles/auto-delete-5y.properties`
+- auto-detection is deliberately conservative: the file must end in `.properties`, exist, be a regular file, and be readable
+- the shorthand accepts the template as the only positional create argument; ambiguous forms such as `create FILE.properties 5y` are rejected with exit code `2`
+- explicit `--properties FILE` remains supported and is required when positional POLICY/AGE overrides are desired
+- classic `create POLICY AGE` behavior is unchanged
+- `create --help` now surfaces the shorthand syntax
+- bumped runtime/package version to `0.3.3`
+
 ## 0.3.2
 
 Self-contained policy-template workflow:
