@@ -65,10 +65,11 @@ final class ParsedArgs {
 }
 
 final class PolicySettings {
-    static final String DEFAULT_SCHEDULE = "0 2 * * *";
-    static final int DEFAULT_COMMIT_COUNT = 100;
-    static final int DEFAULT_MAX_ITEMS = 5000;
-    static final int DEFAULT_MAX_DURATION = 120;
+    static final String DEFAULT_SCHEDULE = PolicyDefaults.DEFAULT_SCHEDULE;
+    static final int DEFAULT_COMMIT_COUNT = PolicyDefaults.DEFAULT_COMMIT_COUNT;
+    static final int DEFAULT_MAX_ITEMS = PolicyDefaults.DEFAULT_MAX_ITEMS;
+    static final int DEFAULT_MAX_DURATION = PolicyDefaults.DEFAULT_MAX_DURATION;
+    static final boolean DEFAULT_FORCE_CHECKIN = PolicyDefaults.DEFAULT_FORCE_CHECKIN;
 
     final Age age;
     final String schedule;
@@ -76,30 +77,44 @@ final class PolicySettings {
     final int maxItems;
     final int maxDuration;
     final boolean forceCheckin;
+    final String propertiesSource;
 
     PolicySettings(Age age, String schedule, int commitCount, int maxItems,
-                   int maxDuration, boolean forceCheckin) {
+                   int maxDuration, boolean forceCheckin, String propertiesSource) {
         this.age = age;
         this.schedule = schedule;
         this.commitCount = commitCount;
         this.maxItems = maxItems;
         this.maxDuration = maxDuration;
         this.forceCheckin = forceCheckin;
+        this.propertiesSource = propertiesSource;
     }
 
     static PolicySettings from(ParsedArgs args, String ageValue) {
-        Age age = Age.parse(ageValue);
-        String schedule = args.option("schedule", DEFAULT_SCHEDULE);
+        PolicyDefaults defaults = PolicyDefaults.load(args.options.get("properties"));
+        String effectiveAge = ageValue == null || ageValue.trim().isEmpty()
+                ? defaults.expirationAge : ageValue;
+        Age age = Age.parse(effectiveAge);
+        String schedule = args.option("schedule", defaults.schedule);
         if (schedule.trim().isEmpty()) {
             throw new CliException("--schedule must not be empty", 2);
         }
+
+        if (args.flag("force-checkin") && args.flag("no-force-checkin")) {
+            throw new CliException("--force-checkin and --no-force-checkin cannot be used together", 2);
+        }
+        boolean forceCheckin = defaults.forceCheckin;
+        if (args.flag("force-checkin")) forceCheckin = true;
+        if (args.flag("no-force-checkin")) forceCheckin = false;
+
         return new PolicySettings(
                 age,
                 schedule,
-                positiveInt(args.option("commit-count", String.valueOf(DEFAULT_COMMIT_COUNT)), "commit-count"),
-                nonNegativeInt(args.option("max-items", String.valueOf(DEFAULT_MAX_ITEMS)), "max-items"),
-                positiveInt(args.option("max-duration", String.valueOf(DEFAULT_MAX_DURATION)), "max-duration"),
-                args.flag("force-checkin"));
+                positiveInt(args.option("commit-count", String.valueOf(defaults.commitCount)), "commit-count"),
+                nonNegativeInt(args.option("max-items", String.valueOf(defaults.maxItems)), "max-items"),
+                positiveInt(args.option("max-duration", String.valueOf(defaults.maxDuration)), "max-duration"),
+                forceCheckin,
+                defaults.source);
     }
 
     private static int positiveInt(String value, String option) {
