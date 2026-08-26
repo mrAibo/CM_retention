@@ -1,4 +1,4 @@
-# cm-retention 0.3.2 – Betriebs- und Benutzerdokumentation
+# cm-retention 0.3.3 – Betriebs- und Benutzerdokumentation
 
 ## 1. Zweck
 
@@ -9,6 +9,7 @@ Das Werkzeug ist bewusst klein und administrativ gehalten. Es unterstützt:
 - Policy- und ItemType-Anzeige
 - Erstellen von FIXED_TIME/AUTO_DELETE-Policies
 - vollständige Policy-Erstellung direkt aus Properties-Vorlagen
+- automatische Erkennung einer lesbaren `.properties`-Datei bei `create`
 - mehrere wiederverwendbare Vorlagen unter `profiles/`
 - Assign/Unassign
 - Dry-run
@@ -25,7 +26,7 @@ bin/cm-retention version
 Erwartet:
 
 ```text
-cm-retention 0.3.2
+cm-retention 0.3.3
 ```
 
 ## 3. Policy-Vorlagen
@@ -62,34 +63,73 @@ auto-delete.force-checkin=true
 
 `auto-delete.force-checkin=true` bedeutet: **Einchecken vor Löschen erzwingen**.
 
-### Mit einer Vorlage direkt eine Policy erzeugen
+### Empfohlene Kurzform
 
-Dry-run:
+Eine lesbare `.properties`-Datei wird bei `create` automatisch als Template erkannt:
 
 ```bash
-bin/cm-retention create \
-  --properties profiles/auto-delete-5y.properties \
-  --dry-run
+bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
 ```
 
 Echte Erstellung:
 
 ```bash
-bin/cm-retention create \
-  --properties profiles/auto-delete-5y.properties
+bin/cm-retention create profiles/auto-delete-5y.properties
 ```
 
 Automatisiert:
 
 ```bash
-bin/cm-retention create \
-  --properties profiles/auto-delete-5y.properties \
-  --yes
+bin/cm-retention create profiles/auto-delete-5y.properties --yes
 ```
 
-Es werden keine zusätzlichen Argumente benötigt. Der Name kommt aus `RET_POLICY_NAME`, die Frist aus `expiration.age`.
+Die Datei darf auch nach normalen Flags stehen:
 
-Eine explizit ausgewählte Datei ohne `RET_POLICY_NAME` wird abgelehnt.
+```bash
+bin/cm-retention create --dry-run profiles/auto-delete-5y.properties
+```
+
+Die Auto-Erkennung greift nur, wenn die Datei:
+
+- auf `.properties` endet,
+- existiert,
+- eine reguläre Datei ist,
+- lesbar ist.
+
+Intern wird die Kurzform auf die weiterhin unterstützte explizite Variante normalisiert:
+
+```bash
+bin/cm-retention create --properties profiles/auto-delete-5y.properties
+```
+
+Name und Frist kommen aus `RET_POLICY_NAME` und `expiration.age`.
+
+Eine explizit oder automatisch ausgewählte Datei ohne `RET_POLICY_NAME` wird abgelehnt.
+
+### Mehrdeutigkeit vermeiden
+
+Im automatischen Template-Modus muss die Properties-Datei das einzige Positionsargument von `create` sein.
+
+Gültig:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties \
+  --schedule "0 4 * * *"
+```
+
+Absichtlich ungültig:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties 10y
+```
+
+Wenn Name oder AGE trotz Vorlage überschrieben werden sollen, muss die explizite Form verwendet werden:
+
+```bash
+bin/cm-retention create TEMP_POLICY 10y \
+  --properties profiles/auto-delete-5y.properties \
+  --dry-run
+```
 
 ### Mitgelieferte Vorlagen
 
@@ -105,31 +145,21 @@ Eigene Vorlagen können einfach kopiert und angepasst werden.
 
 ```text
 CLI POLICY / AGE / Optionen
-  > --properties FILE
+  > ausgewählte Properties-Vorlage
   > ret-policy.properties
   > eingebaute Defaults
 ```
 
-Beispiele:
+Klassische CLI-Variante:
 
 ```bash
-# Komplett aus Vorlage
-bin/cm-retention create --properties profiles/auto-delete-5y.properties
-
-# Klassische CLI-Variante
 bin/cm-retention create AUTO_DELETE_5Y 5y
-
-# Vorlage, aber Name und Frist bewusst per CLI überschreiben
-bin/cm-retention create TEMP_POLICY 30d \
-  --properties profiles/auto-delete-5y.properties \
-  --dry-run
 ```
 
-Ein einzelner CLI-Override gewinnt ebenfalls gegen die Properties:
+Ein einzelner CLI-Override gewinnt gegen die Properties:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y \
-  --properties profiles/auto-delete-5y.properties \
+bin/cm-retention create profiles/auto-delete-5y.properties \
   --schedule "0 4 * * *" \
   --max-items 10000
 ```
@@ -137,7 +167,7 @@ bin/cm-retention create AUTO_DELETE_5Y 5y \
 Default Force-Checkin deaktivieren:
 
 ```bash
-bin/cm-retention create AUTO_DELETE_5Y 5y --no-force-checkin
+bin/cm-retention create profiles/auto-delete-5y.properties --no-force-checkin
 ```
 
 ## 4. Unterstütztes Policy-Modell
@@ -256,18 +286,18 @@ Auf einem IBM-CM-8.7-Host mit echter `cmbicmsdk81.jar`:
 ./build.sh
 ```
 
-Version 0.3.2 erzeugt:
+Version 0.3.3 erzeugt automatisch:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.3.2.jar
+build/cm-retention-0.3.3.jar
 build/.version
 build/ret-policy.properties
 build/profiles/auto-delete-1y.properties
 build/profiles/auto-delete-5y.properties
 build/profiles/auto-delete-10y.properties
-build/cm-retention-0.3.2-runtime.tar.gz
-build/SHA256SUMS-0.3.2
+build/cm-retention-0.3.3-runtime.tar.gz
+build/SHA256SUMS-0.3.3
 ```
 
 Das Runtime-TAR.GZ ist für Zielserver ohne Git/javac gedacht und enthält auch die Policy-Vorlagen.
@@ -283,15 +313,15 @@ Auf dem Build-Host:
 Dann übertragen:
 
 ```text
-build/cm-retention-0.3.2-runtime.tar.gz
+build/cm-retention-0.3.3-runtime.tar.gz
 ```
 
 Auf dem Zielserver:
 
 ```bash
 cd /home/ibmcmadm
-tar -xzf cm-retention-0.3.2-runtime.tar.gz
-cd cm-retention-0.3.2
+tar -xzf cm-retention-0.3.3-runtime.tar.gz
+cd cm-retention-0.3.3
 cp .env.example .env
 chmod 600 .env
 vi .env
@@ -308,7 +338,7 @@ bin/cm-retention doctor
 bin/cm-retention status
 bin/cm-retention policies
 bin/cm-retention itemtypes
-bin/cm-retention create --properties profiles/auto-delete-1y.properties --dry-run
+bin/cm-retention create profiles/auto-delete-1y.properties --dry-run
 ```
 
 Im Create-Plan muss erscheinen:
@@ -320,6 +350,12 @@ Force checkin: yes
 ```
 
 und als Properties-Quelle die verwendete Vorlage.
+
+Zusätzlich sollte die klassische Syntax unverändert funktionieren:
+
+```bash
+bin/cm-retention create TEST_POLICY 30d --dry-run
+```
 
 ## 12. Exit-Codes
 
