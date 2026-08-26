@@ -161,7 +161,7 @@ final class CmCli {
         System.out.println("Expiration   : " + settings.age.human());
         System.out.println("Action       : AUTO_DELETE");
         System.out.println("Schedule     : " + scheduleHuman(settings.schedule));
-        System.out.println("Limits       : " + settings.maxItems + " items / " + settings.maxDuration + " min");
+        System.out.println("Limits       : " + settings.maxItems + " items / " + settings.maxDuration + " sec");
         System.out.println("Commit       : every " + settings.commitCount + " items");
         System.out.println("Force checkin: " + (settings.forceCheckin ? "yes" : "no"));
         if (finishDryRun(args)) return;
@@ -486,7 +486,7 @@ final class CmCli {
         System.out.println("  schedule          daily 02:00 (0 2 * * *)");
         System.out.println("  commit-count      100");
         System.out.println("  max-items         5000 (0 means unlimited)");
-        System.out.println("  max-duration      120 minutes");
+        System.out.println("  max-duration      120 seconds");
         System.out.println("  force-checkin     true\n");
         System.out.println("Advanced CLI overrides:");
         System.out.println("  --schedule \"0 4 * * *\"");
