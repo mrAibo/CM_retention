@@ -55,33 +55,40 @@ final class PolicyDefaults {
         String source = "built-in defaults";
 
         String configuredPath = explicitPath;
-        if (configuredPath == null || configuredPath.trim().isEmpty()) {
+        boolean explicit = configuredPath != null && !configuredPath.trim().isEmpty();
+        if (!explicit) {
             configuredPath = System.getenv("CM_RETENTION_POLICY_PROPERTIES");
+        }
+        if (configuredPath == null || configuredPath.trim().isEmpty()) {
+            configuredPath = defaultBundledPath();
         }
 
         if (configuredPath != null && !configuredPath.trim().isEmpty()) {
             Path path = Paths.get(configuredPath).toAbsolutePath().normalize();
             if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
-                throw new CliException("Policy properties file is not readable: " + path, 2);
-            }
-            Properties loaded = new Properties();
-            try {
-                InputStream input = Files.newInputStream(path);
+                if (explicit || System.getenv("CM_RETENTION_POLICY_PROPERTIES") != null) {
+                    throw new CliException("Policy properties file is not readable: " + path, 2);
+                }
+            } else {
+                Properties loaded = new Properties();
                 try {
-                    loaded.load(input);
-                } finally {
-                    input.close();
+                    InputStream input = Files.newInputStream(path);
+                    try {
+                        loaded.load(input);
+                    } finally {
+                        input.close();
+                    }
+                } catch (IOException e) {
+                    throw new CliException("Cannot read policy properties file " + path + ": " + e.getMessage(), 2);
                 }
-            } catch (IOException e) {
-                throw new CliException("Cannot read policy properties file " + path + ": " + e.getMessage(), 2);
-            }
-            for (String key : loaded.stringPropertyNames()) {
-                if (!ALLOWED_KEYS.contains(key)) {
-                    throw new CliException("Unknown policy property '" + key + "' in " + path, 2);
+                for (String key : loaded.stringPropertyNames()) {
+                    if (!ALLOWED_KEYS.contains(key)) {
+                        throw new CliException("Unknown policy property '" + key + "' in " + path, 2);
+                    }
+                    properties.setProperty(key, loaded.getProperty(key));
                 }
-                properties.setProperty(key, loaded.getProperty(key));
+                source = path.toString();
             }
-            source = path.toString();
         }
 
         validateSemanticMode(properties, source);
@@ -100,6 +107,18 @@ final class PolicyDefaults {
 
         return new PolicyDefaults(source, expirationAge, schedule,
                 commitCount, maxItems, maxDuration, forceCheckin);
+    }
+
+    private static String defaultBundledPath() {
+        String envFile = System.getenv("CM_RETENTION_ENV_FILE");
+        if (envFile != null && !envFile.trim().isEmpty()) {
+            Path envPath = Paths.get(envFile).toAbsolutePath().normalize();
+            Path parent = envPath.getParent();
+            if (parent != null) {
+                return parent.resolve("ret-policy.properties").toString();
+            }
+        }
+        return Paths.get("ret-policy.properties").toAbsolutePath().normalize().toString();
     }
 
     private static Properties builtinProperties() {
