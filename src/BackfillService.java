@@ -183,6 +183,30 @@ final class BackfillService {
                         + " WHERE " + MISSING_DATES);
     }
 
+    /**
+     * Independent batch-verifier path. It derives the current root from fresh CM
+     * metadata and first uses a one-row existence probe so clean ItemTypes avoid
+     * a full COUNT. A COUNT is done only when a residual mismatch actually exists.
+     */
+    long remainingMissingForIndependentVerification(DKItemTypeDefICM itemType,
+                                                     String currentPolicy,
+                                                     String targetPolicy) throws Exception {
+        if (!targetPolicy.equals(CmService.normalizePolicy(currentPolicy))) {
+            throw new CliException("Verification failed: itemtype " + itemType.getName()
+                    + " uses " + CmService.emptyAsDash(currentPolicy)
+                    + " instead of " + targetPolicy, 6);
+        }
+        Connection db = connection();
+        RootFingerprint currentRoot = resolveRootFingerprint(db, itemType.getIntId());
+        validateSegment(currentRoot, 6);
+        String table = qualified(currentRoot.tableName);
+        if (!queryExists(db, dialect.existsQuery(table, MISSING_DATES))) {
+            return 0L;
+        }
+        return queryLong(db,
+                "SELECT COUNT(*) FROM " + table + " WHERE " + MISSING_DATES);
+    }
+
     void requireRootUnchanged(DKItemTypeDefICM itemType,
                               RootFingerprint expectedRoot,
                               String stage,
