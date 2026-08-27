@@ -58,6 +58,13 @@ preflight_ok() {
 DOCTOR_MODE=0
 [[ ${1:-} == doctor ]] && DOCTOR_MODE=1
 
+HAS_FILE=0
+HAS_BACKFILL=0
+for arg in "$@"; do
+    [[ "$arg" == --file ]] && HAS_FILE=1
+    [[ "$arg" == --backfill ]] && HAS_BACKFILL=1
+done
+
 NEEDS_CONFIG=1
 case ${1:-} in
     version|--version|help|--help|-h|selftest) NEEDS_CONFIG=0 ;;
@@ -139,10 +146,11 @@ if [[ -f "$ENV_FILE" ]]; then
     export CM_RETENTION_ENV_FILE="$ENV_FILE"
 fi
 
-# JDBC drivers used by CM itself and by explicit --backfill operations.
-# BACKFILL_JDBC_JAR is the preferred database-neutral setting. Legacy DB2 and
-# Oracle-specific names remain accepted. Without an explicit path, known DB2
-# and Oracle CM installation locations are discovered and added if present.
+# JDBC drivers used only by explicit --backfill. BACKFILL_JDBC_JAR is the
+# preferred database-neutral setting; legacy DB2/Oracle names remain accepted.
+# A missing explicitly configured driver is fatal for --backfill (and surfaced
+# by doctor), but does not block ordinary CM-SDK commands that never open the
+# direct JDBC connection.
 BACKFILL_JDBC_JAR=${BACKFILL_JDBC_JAR:-$(read_env_value BACKFILL_JDBC_JAR "$ENV_FILE")}
 DB2_JDBC_JAR=${DB2_JDBC_JAR:-$(read_env_value DB2_JDBC_JAR "$ENV_FILE")}
 ORACLE_JDBC_JAR=${ORACLE_JDBC_JAR:-$(read_env_value ORACLE_JDBC_JAR "$ENV_FILE")}
@@ -153,7 +161,7 @@ add_jdbc_jar() {
     local explicit=${2:-0}
     [[ -n "$jar" ]] || return 0
     if [[ ! -f "$jar" ]]; then
-        if [[ $explicit -eq 1 ]]; then
+        if [[ $explicit -eq 1 && ( $HAS_BACKFILL -eq 1 || $DOCTOR_MODE -eq 1 ) ]]; then
             preflight_fail "JDBC driver" "configured JDBC driver does not exist: $jar"
         fi
         return 0
@@ -171,20 +179,21 @@ else
     [[ -n "$DB2_JDBC_JAR" ]] && add_jdbc_jar "$DB2_JDBC_JAR" 1
     [[ -n "$ORACLE_JDBC_JAR" ]] && add_jdbc_jar "$ORACLE_JDBC_JAR" 1
 
-    if [[ ${#JDBC_JARS[@]} -eq 0 ]]; then
-        for candidate in \
-            "${IBMCMROOT}/lib/db2jcc4.jar" \
-            "${IBMCMROOT}/lib/db2jcc.jar" \
-            "/opt/IBM/db2/V11.5/java/db2jcc4.jar" \
-            "/opt/ibm/db2/V11.5/java/db2jcc4.jar" \
-            "${IBMCMROOT}/lib/ojdbc8.jar" \
-            "${JAVA_HOME}/../OracleLibs/ojdbc8.jar" \
-            "/opt/IBM/WebSphere/AppServer/OracleLibs/ojdbc8.jar"; do
-            add_jdbc_jar "$candidate" 0
-        done
-        if [[ -n "${ORACLE_HOME:-}" ]]; then
-            add_jdbc_jar "${ORACLE_HOME}/jdbc/lib/ojdbc8.jar" 0
-        fi
+    # Add any discoverable compatible drivers as well; duplicates are ignored.
+    # This keeps mixed/transition installations deterministic even if one legacy
+    # driver setting is already present.
+    for candidate in \
+        "${IBMCMROOT}/lib/db2jcc4.jar" \
+        "${IBMCMROOT}/lib/db2jcc.jar" \
+        "/opt/IBM/db2/V11.5/java/db2jcc4.jar" \
+        "/opt/ibm/db2/V11.5/java/db2jcc4.jar" \
+        "${IBMCMROOT}/lib/ojdbc8.jar" \
+        "${JAVA_HOME}/../OracleLibs/ojdbc8.jar" \
+        "/opt/IBM/WebSphere/AppServer/OracleLibs/ojdbc8.jar"; do
+        add_jdbc_jar "$candidate" 0
+    done
+    if [[ -n "${ORACLE_HOME:-}" ]]; then
+        add_jdbc_jar "${ORACLE_HOME}/jdbc/lib/ojdbc8.jar" 0
     fi
 fi
 
@@ -205,13 +214,6 @@ run_batch() {
 run_single_backfill() {
     "$JAVA" -cp "$CLASSPATH" SingleBackfillMain "$@"
 }
-
-HAS_FILE=0
-HAS_BACKFILL=0
-for arg in "$@"; do
-    [[ "$arg" == --file ]] && HAS_FILE=1
-    [[ "$arg" == --backfill ]] && HAS_BACKFILL=1
-done
 
 if [[ $HAS_FILE -eq 1 ]]; then
     case ${1:-} in
