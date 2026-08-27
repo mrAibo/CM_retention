@@ -49,7 +49,8 @@ public final class BatchMain {
 
             System.out.println();
             System.out.println("NOTE: batch execution is sequential, not atomic.");
-            System.out.println("If a runtime error occurs, processing stops immediately, but earlier successful changes remain committed.");
+            System.out.println("True runtime/verification failures stop immediately; earlier successful changes remain committed.");
+            System.out.println("Verified IBM CM secondary warnings are reported, counted and do not stop later ItemTypes.");
             if (options.backfill) {
                 System.out.println("Each ItemType is processed as: guarded database backfill -> policy fingerprint guard -> assignment -> final verify.");
             }
@@ -71,6 +72,9 @@ public final class BatchMain {
 
             long phase2Started = Timing.start();
             int completed = 0;
+            int clean = 0;
+            List<String> warningItemTypes = new ArrayList<String>();
+
             for (int i = 0; i < entries.size(); i++) {
                 BatchEntry entry = entries.get(i);
                 long itemStarted = Timing.start();
@@ -90,13 +94,26 @@ public final class BatchMain {
                         }
                     } else {
                         cm.unassignPolicy(entry.itemTypeName, entry.expectedPolicy);
-                        System.out.println("Unassigned: " + CmService.emptyAsDash(entry.expectedPolicy)
-                                + " from " + entry.itemTypeName);
+                        if (entry.expectedPolicy == null) {
+                            System.out.println("No change: " + entry.itemTypeName + " already has no retention policy.");
+                        } else {
+                            System.out.println("Unassigned: " + entry.expectedPolicy + " from " + entry.itemTypeName);
+                        }
                     }
                     completed++;
+                    clean++;
+                } catch (OperationWarning warning) {
+                    // OperationWarning is emitted only after CmService has
+                    // reconnected and confirmed the requested persisted state.
+                    // BackfillWorkflow also rethrows it only after its complete
+                    // final Policy/Root/NULL verification has succeeded.
+                    completed++;
+                    warningItemTypes.add(entry.itemTypeName);
+                    printVerifiedWarning(entry.itemTypeName, warning);
                 } catch (Exception e) {
                     System.err.println("ERROR: batch stopped at '" + entry.itemTypeName + "' after "
-                            + completed + " fully verified item(s).");
+                            + completed + " verified item(s), including "
+                            + warningItemTypes.size() + " verified warning(s).");
                     System.err.println("Earlier successful changes remain committed; review current state before retrying.");
                     throw e;
                 } finally {
@@ -106,14 +123,24 @@ public final class BatchMain {
             }
 
             long phase2Nanos = Timing.elapsed(phase2Started);
+            int warnings = warningItemTypes.size();
             System.out.println("Batch complete: " + completed + "/" + entries.size()
-                    + " item types processed successfully.");
+                    + " item types reached a verified final state.");
+            System.out.println("Clean success     : " + clean);
+            System.out.println("Verified warnings : " + warnings);
+            if (warnings > 0) {
+                System.out.println("Warning itemtypes : " + formatWarningItems(warningItemTypes, 20));
+                System.out.println("Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.");
+                rc = 6;
+            }
             System.out.println("Phase 2 timing: " + Timing.format(phase2Nanos));
             System.out.println("Total timing  : " + Timing.since(totalStarted));
         } catch (CliException e) {
             System.err.println("ERROR: " + e.getMessage());
             rc = e.exitCode;
         } catch (OperationWarning e) {
+            // Defensive top-level fallback. Normal Phase-2 warnings are handled
+            // per ItemType above so the batch can continue.
             System.err.println("WARNING: " + e.getMessage());
             BackfillMain.printDkException(e.cause);
             rc = 6;
@@ -132,6 +159,29 @@ public final class BatchMain {
             if (cm != null) cm.closeQuietly();
         }
         if (rc != 0) System.exit(rc);
+    }
+
+    private static void printVerifiedWarning(String itemTypeName, OperationWarning warning) {
+        System.err.println("WARNING: verified secondary IBM CM error for " + itemTypeName + ":");
+        System.err.println("  " + warning.getMessage());
+        BackfillMain.printDkException(warning.cause);
+        System.err.println("CONTINUE: requested persisted state was verified; processing the next ItemType.");
+    }
+
+    static String formatWarningItems(List<String> itemTypes, int limit) {
+        if (itemTypes == null || itemTypes.isEmpty()) return "-";
+        int effectiveLimit = Math.max(1, limit);
+        StringBuilder result = new StringBuilder();
+        int shown = Math.min(itemTypes.size(), effectiveLimit);
+        for (int i = 0; i < shown; i++) {
+            if (i > 0) result.append(", ");
+            result.append(itemTypes.get(i));
+        }
+        int remaining = itemTypes.size() - shown;
+        if (remaining > 0) {
+            result.append(" ... (+").append(remaining).append(" more)");
+        }
+        return result.toString();
     }
 
     private static List<BatchEntry> validateAll(CmService cm,
