@@ -17,8 +17,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 final class CmService {
     private final Config config;
@@ -54,7 +56,8 @@ final class CmService {
     }
 
     int policyCount() throws Exception {
-        return policyNames().size();
+        String[] names = policyManager().listRetentionPolicyNames();
+        return names == null ? 0 : names.length;
     }
 
     int itemTypeCount() throws Exception {
@@ -78,6 +81,14 @@ final class CmService {
                 return safe(left.getName()).compareToIgnoreCase(safe(right.getName()));
             }
         });
+        return result;
+    }
+
+    Map<String, DKItemTypeDefICM> itemTypesByName() throws Exception {
+        Map<String, DKItemTypeDefICM> result = new LinkedHashMap<String, DKItemTypeDefICM>();
+        for (DKItemTypeDefICM itemType : listItemTypes()) {
+            result.put(itemType.getName(), itemType);
+        }
         return result;
     }
 
@@ -128,7 +139,7 @@ final class CmService {
         System.out.println("Auto-delete schedule:       " + emptyAsDash(itemType.getDeleteExpiredItemsScheduleInformation()));
         System.out.println("Auto-delete commit count:   " + itemType.getDeleteExpiredItemsCommitCount());
         System.out.println("Auto-delete max. items:     " + itemType.getDeleteExpiredItemsMaximumRows());
-        System.out.println("Auto-delete max. duration:  " + itemType.getDeleteExpiredItemsMaximumDuration());
+        System.out.println("Auto-delete max. duration:  " + itemType.getDeleteExpiredItemsMaximumDuration() + " sec");
     }
 
     List<String> policyNames() throws Exception {
@@ -141,22 +152,42 @@ final class CmService {
         return sorted;
     }
 
-    DKRetentionPolicyDefICM requirePolicy(String name) throws Exception {
-        for (String existing : policyNames()) {
-            if (name.equals(existing)) {
-                return policyManager().retrieveRetentionPolicy(name);
-            }
+    List<DKRetentionPolicyDefICM> listPolicies() throws Exception {
+        dkCollection collection = policyManager().listRetentionPolicies();
+        dkIterator iterator = collection.createIterator();
+        List<DKRetentionPolicyDefICM> result = new ArrayList<DKRetentionPolicyDefICM>();
+        while (iterator.more()) {
+            result.add((DKRetentionPolicyDefICM) iterator.next());
         }
-        throw new CliException("Policy not found: " + name, 4);
+        Collections.sort(result, new Comparator<DKRetentionPolicyDefICM>() {
+            @Override
+            public int compare(DKRetentionPolicyDefICM left, DKRetentionPolicyDefICM right) {
+                return safe(left.getName()).compareToIgnoreCase(safe(right.getName()));
+            }
+        });
+        return result;
+    }
+
+    DKRetentionPolicyDefICM requirePolicy(String name) throws Exception {
+        DKRetentionPolicyDefICM policy = policyManager().retrieveRetentionPolicy(name);
+        if (policy == null) {
+            throw new CliException("Policy not found: " + name, 4);
+        }
+        return policy;
+    }
+
+    DKRetentionPolicyDefICM requirePolicyFresh(String name) throws Exception {
+        DKPolicyMgmtICM manager = policyManager();
+        manager.clearCache();
+        DKRetentionPolicyDefICM policy = manager.retrieveRetentionPolicy(name);
+        if (policy == null) {
+            throw new CliException("Policy not found: " + name, 4);
+        }
+        return policy;
     }
 
     boolean policyExists(String name) throws Exception {
-        for (String existing : policyNames()) {
-            if (name.equals(existing)) {
-                return true;
-            }
-        }
-        return false;
+        return policyManager().retrieveRetentionPolicy(name) != null;
     }
 
     List<String> policyUsage(String name) throws Exception {
@@ -170,14 +201,23 @@ final class CmService {
     }
 
     void printPolicyList() throws Exception {
-        List<String> sorted = policyNames();
+        List<DKRetentionPolicyDefICM> policies = listPolicies();
+        Map<String, Integer> usageCounts = new LinkedHashMap<String, Integer>();
+        for (DKItemTypeDefICM itemType : listItemTypes()) {
+            String policyName = normalizePolicy(itemType.getItemTypeRetentionPolicyName());
+            if (policyName != null) {
+                Integer count = usageCounts.get(policyName);
+                usageCounts.put(policyName, Integer.valueOf(count == null ? 1 : count.intValue() + 1));
+            }
+        }
+
         System.out.printf("%-32s %-12s %-12s %-16s %s%n",
                 "POLICY", "TYPE", "EXPIRATION", "ACTION", "ITEMTYPES");
         System.out.printf("%-32s %-12s %-12s %-16s %s%n",
                 repeat('-', 32), repeat('-', 12), repeat('-', 12), repeat('-', 16), repeat('-', 9));
-        for (String name : sorted) {
-            DKRetentionPolicyDefICM policy = policyManager().retrieveRetentionPolicy(name);
-            int assignedCount = policyUsage(name).size();
+        for (DKRetentionPolicyDefICM policy : policies) {
+            Integer assigned = usageCounts.get(policy.getName());
+            int assignedCount = assigned == null ? 0 : assigned.intValue();
             System.out.printf("%-32s %-12s %-12s %-16s %d%n",
                     safe(policy.getName()),
                     safe(String.valueOf(policy.getRetentionType())),
@@ -188,7 +228,7 @@ final class CmService {
                     assignedCount);
         }
         System.out.println();
-        System.out.println("Count: " + sorted.size());
+        System.out.println("Count: " + policies.size());
     }
 
     void printPolicy(String name) throws Exception {
@@ -211,7 +251,7 @@ final class CmService {
             System.out.println("Auto-delete schedule:       " + emptyAsDash(policy.getDeleteExpiredItemsScheduleInformation()));
             System.out.println("Auto-delete commit count:   " + policy.getDeleteExpiredItemsCommitCount());
             System.out.println("Auto-delete max. items:     " + policy.getDeleteExpiredItemsMaximumRows());
-            System.out.println("Auto-delete max. duration:  " + policy.getDeleteExpiredItemsMaximumDuration());
+            System.out.println("Auto-delete max. duration:  " + policy.getDeleteExpiredItemsMaximumDuration() + " sec");
             System.out.println("Force check-in:             " + policy.isDeleteExpiredItemsForceCheckInEnabled());
         }
         List<String> usage = policyUsage(name);
@@ -222,8 +262,23 @@ final class CmService {
     }
 
     void assignPolicy(String itemTypeName, String policyName, String expectedCurrent) throws Exception {
+        assignPolicy(itemTypeName, policyName, expectedCurrent, null, 5);
+    }
+
+    void assignPolicy(String itemTypeName,
+                      String policyName,
+                      String expectedCurrent,
+                      PolicyFingerprint expectedPolicy,
+                      int policyMismatchExitCode) throws Exception {
         DKItemTypeDefICM itemType = requireItemType(itemTypeName);
-        requirePolicy(policyName);
+        DKRetentionPolicyDefICM targetPolicy = expectedPolicy == null
+                ? requirePolicy(policyName) : requirePolicyFresh(policyName);
+        if (expectedPolicy != null) {
+            expectedPolicy.requireSame(
+                    PolicyFingerprint.from(targetPolicy),
+                    "immediately before policy assignment", policyMismatchExitCode);
+        }
+
         String current = normalizePolicy(itemType.getItemTypeRetentionPolicyName());
         if (!samePolicy(current, expectedCurrent)) {
             throw new CliException("State changed before update: " + itemTypeName
@@ -313,8 +368,10 @@ final class CmService {
     }
 
     private void verifyCreatedPolicy(String name, PolicySettings expected) throws Exception {
-        DKRetentionPolicyDefICM actual = requirePolicy(name);
-        boolean valid = actual.isExpirationEnabled()
+        DKRetentionPolicyDefICM actual = requirePolicyFresh(name);
+        boolean valid = actual.getRetentionType() == DK_ICM_RETENTION_TYPE.FIXED_TIME
+                && !actual.isRetentionEnabled()
+                && actual.isExpirationEnabled()
                 && actual.getExpirationAction() == DK_ICM_EXPIRATION_ACTION_TYPE.AUTO_DELETE
                 && actual.getExpirationTimePeriod() == expected.age.amount
                 && actual.getDefaultExpirationTimeUnit() == expected.age.unit
