@@ -60,7 +60,7 @@ DOCTOR_MODE=0
 
 NEEDS_CONFIG=1
 case ${1:-} in
-    version|--version|help|--help|-h) NEEDS_CONFIG=0 ;;
+    version|--version|help|--help|-h|selftest) NEEDS_CONFIG=0 ;;
 esac
 for arg in "$@"; do
     if [[ "$arg" == --help || "$arg" == -h ]]; then
