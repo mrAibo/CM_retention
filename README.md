@@ -2,13 +2,13 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.3.4**
+Current version: **0.3.5**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no additional runtime dependencies beyond the existing IBM CM / DB2 runtime.
 
 ## Main capabilities
 
-- list and inspect retention policies
+- list and inspect retention policies and their assigned ItemTypes
 - list and inspect ItemTypes
 - create fixed-time `AUTO_DELETE` policies
 - create policies directly from reusable `.properties` templates
@@ -16,8 +16,12 @@ The project intentionally stays narrow: Java 8, the IBM CM SDK already installed
 - keep multiple policy templates under `profiles/`
 - assign and unassign policies
 - process multiple ItemTypes with `--file` in one native Java batch runtime
+- run single-item `--backfill` in one native Java runtime
 - preview writes with `--dry-run`
 - optionally backfill existing objects before assignment with `--backfill`
+- guard backfill with Policy/Root fingerprints before and after DB2 COMMIT
+- print phase/item timings for batch and backfill workflows
+- run pure regression checks with `selftest`
 - load policy defaults from `ret-policy.properties`
 - show connection/runtime status and run diagnostics with `doctor`
 
@@ -31,6 +35,7 @@ The tool does **not** directly delete documents and does not invoke `deleteExpir
 cm-retention
 cm-retention status
 cm-retention doctor
+cm-retention selftest
 
 cm-retention policies
 cm-retention policy [POLICY]
@@ -63,7 +68,7 @@ A compact policy list is available with:
 bin/cm-retention policies
 ```
 
-The `ITEMTYPES` column shows how many ItemTypes currently use each policy.
+The `ITEMTYPES` column shows how many ItemTypes currently use each policy. Since 0.3.5 this view obtains the policy collection and ItemType collection in bulk and calculates the usage counts in memory instead of doing per-policy usage round-trips.
 
 For a single policy, use:
 
@@ -92,7 +97,7 @@ If the policy is unused, the output is:
 Assigned itemtypes:         0
 ```
 
-The ItemType names are sorted alphabetically. This is useful before changing or deleting a policy.
+The ItemType names are sorted alphabetically. `Auto-delete max. duration` is displayed explicitly in **seconds** in both policy and ItemType detail output.
 
 ---
 
@@ -139,21 +144,9 @@ profiles/auto-delete-10y.properties
 
 ## Recommended create syntax
 
-The normal template workflow is now simply:
-
 ```bash
 bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
-```
-
-If the plan is correct:
-
-```bash
 bin/cm-retention create profiles/auto-delete-5y.properties
-```
-
-For automation:
-
-```bash
 bin/cm-retention create profiles/auto-delete-5y.properties --yes
 ```
 
@@ -163,14 +156,7 @@ The file can also follow normal flags:
 bin/cm-retention create --dry-run profiles/auto-delete-5y.properties
 ```
 
-The tool recognizes the argument as a template only when it:
-
-- ends with `.properties`
-- exists
-- is a regular file
-- is readable
-
-The detected shorthand is internally normalized to the explicit form:
+The tool recognizes the argument as a template only when it ends with `.properties`, exists, is a regular file and is readable. The shorthand is internally normalized to:
 
 ```bash
 bin/cm-retention create --properties profiles/auto-delete-5y.properties
@@ -182,19 +168,19 @@ The explicit form remains fully supported.
 
 Automatic template mode accepts the template as the **only positional create argument**.
 
-This is valid:
+Valid:
 
 ```bash
 bin/cm-retention create profiles/auto-delete-5y.properties --schedule "0 4 * * *"
 ```
 
-This is deliberately rejected:
+Deliberately rejected:
 
 ```bash
 bin/cm-retention create profiles/auto-delete-5y.properties 10y
 ```
 
-If you want to use a template but override the policy name or expiration age positionally, use the explicit form:
+To override the policy name or age positionally, use the explicit form:
 
 ```bash
 bin/cm-retention create TEMP_POLICY 10y \
@@ -202,25 +188,16 @@ bin/cm-retention create TEMP_POLICY 10y \
   --dry-run
 ```
 
-This avoids ambiguous interpretation.
-
-## Default template
+## Default template and precedence
 
 Because the default `ret-policy.properties` contains both `RET_POLICY_NAME` and `expiration.age`, this also works:
 
 ```bash
 bin/cm-retention create --dry-run
-```
-
-and then:
-
-```bash
 bin/cm-retention create
 ```
 
-## Precedence
-
-When creating a policy, values are resolved in this order:
+Values are resolved in this order:
 
 ```text
 explicit CLI POLICY / AGE / options
@@ -228,6 +205,8 @@ explicit CLI POLICY / AGE / options
         > default ret-policy.properties
         > built-in fallback
 ```
+
+There is no hidden environment-variable override for the policy-template path in 0.3.5; use the explicit `--properties FILE` form (or the automatic readable-file shorthand) when selecting another template.
 
 Classic CLI creation remains supported:
 
@@ -245,17 +224,13 @@ bin/cm-retention create profiles/auto-delete-5y.properties \
   --max-duration 180
 ```
 
-`--max-duration` is also in seconds, so `--max-duration 180` means 3 minutes.
+`--max-duration 180` means 180 seconds (3 minutes).
 
 Force-checkin can be changed for one create operation:
 
 ```bash
 bin/cm-retention create profiles/auto-delete-5y.properties --no-force-checkin
 ```
-
-`--force-checkin` and `--no-force-checkin` together are rejected.
-
-## Supported semantic model
 
 Policy creation remains intentionally constrained to:
 
@@ -279,9 +254,7 @@ There are two supported deployment models:
 
 The second model is recommended for controlled TEST/PROD servers.
 
-## Runtime prerequisites
-
-Typical paths:
+Typical runtime paths:
 
 ```text
 IBMCMROOT=/opt/IBM/db2cmv8
@@ -304,12 +277,6 @@ ${JAVA_HOME}/bin/javac
 ${JAVA_HOME}/bin/jar
 ```
 
-Recommended runtime user:
-
-```text
-ibmcmadm
-```
-
 ## Configuration
 
 ```bash
@@ -328,25 +295,11 @@ IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ```
 
-The launcher refuses insecure `.env` permissions.
-
-For TEST and PROD, prefer separate files:
-
-```text
-.env.test
-.env.prod
-```
-
-and invoke them explicitly:
-
-```bash
-bin/cm-retention --env .env.test status
-bin/cm-retention --env .env.prod status
-```
+The launcher refuses insecure `.env` permissions. For separate environments prefer `.env.test` / `.env.prod` and use `--env` explicitly.
 
 ---
 
-# Build
+# Build and self-test
 
 Run on a compatible IBM CM 8.7 build host:
 
@@ -354,67 +307,58 @@ Run on a compatible IBM CM 8.7 build host:
 ./build.sh
 ```
 
-The version is read from `src/CmRetention.java` and written into the JAR manifest and `build/.version`.
+The version is read from `src/CmRetention.java`. Since 0.3.5 the build compiles all sources and then automatically runs a **pure regression self-test** before creating the JAR. The self-test loads the installed SDK classes but does **not** log in to Content Manager and does **not** connect to DB2.
 
-For version 0.3.4 the build creates:
+It covers the age parser, template auto-detection, Policy/Root fingerprints, generated backfill SQL (including the required `CREATETS` column) and timing units.
+
+A successful build includes:
+
+```text
+Running self-test...
+Self-test: OK (... checks)
+...
+Self-test:      passed
+```
+
+For version 0.3.5 the build creates:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.3.4.jar
+build/cm-retention-0.3.5.jar
 build/.version
 build/ret-policy.properties
 build/profiles/auto-delete-1y.properties
 build/profiles/auto-delete-5y.properties
 build/profiles/auto-delete-10y.properties
-build/cm-retention-0.3.4-runtime.tar.gz
-build/SHA256SUMS-0.3.4
+build/cm-retention-0.3.5-runtime.tar.gz
+build/SHA256SUMS-0.3.5
 ```
 
 Verify:
 
 ```bash
 cat build/.version
-ls -lh build/cm-retention*.jar
-find build/profiles -maxdepth 1 -type f -name '*.properties' -print
 bin/cm-retention version
+bin/cm-retention selftest
 ```
 
 Expected:
 
 ```text
-0.3.4
-cm-retention 0.3.4
+0.3.5
+cm-retention 0.3.5
+Self-test: OK (... checks)
 ```
+
+The runtime bundle also contains `tests/selftest.sh`.
 
 ## Deployment without Git
 
-On the build host:
+Copy `build/cm-retention-0.3.5-runtime.tar.gz` to the target server, extract it, create a protected `.env`, then run:
 
 ```bash
-./build.sh
-```
-
-Copy:
-
-```text
-build/cm-retention-0.3.4-runtime.tar.gz
-```
-
-to the target server.
-
-On the target:
-
-```bash
-cd /home/ibmcmadm
-tar -xzf cm-retention-0.3.4-runtime.tar.gz
-cd cm-retention-0.3.4
-
-cp .env.example .env
-chmod 600 .env
-vi .env
-
-cat build/.version
 bin/cm-retention version
+bin/cm-retention selftest
 bin/cm-retention doctor
 bin/cm-retention status
 ```
@@ -450,9 +394,9 @@ Always start with:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 ```
 
-The backfill resolves the ItemType root component/table automatically. The user never supplies an `ICMUT...` table name.
+Since 0.3.5 the entire single-item workflow runs in **one JVM** using the same guarded Java workflow as batch backfill. The old shell sequence of separate plan/apply/assign/verify JVMs is no longer used.
 
-For eligible rows the equivalent DB2 operation is:
+For eligible rows the equivalent DB2 operation remains:
 
 ```sql
 UPDATE ICMADMIN.<ROOT_TABLE>
@@ -462,30 +406,36 @@ WHERE ICM$RETENTIONDATE IS NULL
   AND CREATETS IS NOT NULL;
 ```
 
-Important: the physical creation timestamp column is `CREATETS`, not `ICM$CREATETS`.
+The physical creation timestamp column is `CREATETS`, not `ICM$CREATETS`.
 
-For a one-year policy the plan therefore prints:
+## Backfill safety fingerprints
 
-```text
-Formula : ICM$AUTODELETEDATE = CREATETS + 1 YEAR
-```
+Phase 1 records immutable snapshots of:
 
-Safety rules include:
+- the target Policy (type, retention/expiration settings, period/unit, action, scheduler and delete limits)
+- the physical root identity (`ItemTypeID`, `ComponentTypeID`, `SegmentID`, generated `ICMUT...` table)
 
-- existing retention/auto-delete dates are never overwritten
-- NULL `CREATETS` causes refusal before update
-- a different currently assigned policy causes refusal
-- only supported FIXED_TIME/AUTO_DELETE policies are accepted
-- root table names are generated internally and validated
-- DB2 UPDATE is committed and verified before policy assignment
-- a committed backfill followed by an unclean assignment/verification returns exit code `6`
-- multi-segment cases fail closed
+The snapshots are checked again:
+
+1. immediately before the DB2 update (mismatch -> exit `5`, no backfill write),
+2. after DB2 COMMIT and before policy assignment (mismatch after a changed-row backfill -> exit `6`, **policy is not assigned**),
+3. during final verification (mismatch -> exit `6`).
+
+This closes the race where a policy with the same name could be edited while the backfill workflow was running.
+
+## Phase-2 fast path
+
+The detailed dry-run/Phase-1 plan still calculates all report counters with one aggregate SELECT. Phase 2 no longer repeats that full aggregate scan. Before the UPDATE it checks fresh metadata/fingerprints and uses only a fail-fast existence query for an eligible row with `NULL CREATETS`.
+
+The DB2 UPDATE is then committed and residual NULL rows are verified before policy assignment.
 
 Real execution:
 
 ```bash
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
 ```
+
+The output includes timings for preflight, DB2, post-COMMIT guard, CM assignment and final verification.
 
 See [docs/BACKFILL.md](docs/BACKFILL.md) for the detailed procedure.
 
@@ -502,44 +452,31 @@ INVOICE
 CONTRACT
 ```
 
-Assign dry-run:
-
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --dry-run
-```
-
-Backfill + assign dry-run:
-
-```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
-```
-
-Real batch:
-
-```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-Since 0.3.4, the complete `--file` workflow runs inside **one JVM** instead of starting a new JVM for every ItemType.
+The complete `--file` workflow runs inside **one JVM**. In 0.3.5 Phase 1 additionally loads the complete ItemType metadata collection once and resolves requested names from an in-memory map instead of issuing one `retrieveEntity()` call per input line. The target policy is resolved once and fingerprinted.
 
-Phase 1:
+With `--backfill`, one DB2 JDBC connection is reused across the batch. Each root-table plan uses one aggregate SELECT. Before Phase 2 the CM validation session is deliberately discarded so writes do not rely on potentially stale metadata.
 
-- opens/reuses one CM runtime for the complete validation pass
-- resolves the target policy once
-- validates every ItemType before the first write
-- with `--backfill`, reuses one DB2 JDBC connection for the batch
-- with `--backfill`, calculates all seven plan counters with one aggregate SELECT per root table instead of seven independent COUNT queries
+Phase 2 remains **sequential, fail-fast and deliberately non-atomic**. No parallel UPDATE/write execution is enabled. If one ItemType fails, processing stops and earlier successful changes remain committed.
 
-Before Phase 2, the CM validation session is deliberately discarded so writes do not rely on potentially stale metadata. Phase 2 remains **sequential and fail-fast**. After every CM write, the existing reconnect-based persisted-state verification remains enabled.
-
-No parallel UPDATE/write execution is performed in 0.3.4. This is intentional: multiple simultaneous large DB2 updates could increase transaction-log, I/O and lock pressure. If one ItemType fails in Phase 2, processing stops and earlier successful changes remain committed.
-
-The output identifies the optimized runtime explicitly:
+The output includes:
 
 ```text
 Batch mode (native Java runtime)
   Runtime   : single JVM
+...
+Phase 1 timing: ... sec
+Item timing: ... sec
+Phase 2 timing: ... sec
+Total timing  : ... sec
 ```
+
+These measurements should be used before deciding whether any future bounded parallel planning is necessary.
 
 ---
 
@@ -573,40 +510,35 @@ If DB2 database/user/password are omitted, the corresponding CM values are used 
 Every normal IBM-CM write follows:
 
 ```text
-resolve
- -> read current state
- -> validate
- -> print plan
- -> dry-run / confirmation
- -> mutate
- -> commit
- -> reconnect / verify persisted state
+resolve -> read current state -> validate -> plan -> dry-run/confirmation
+ -> mutate -> commit -> reconnect/verify persisted state
 ```
 
 Batch mode adds:
 
 ```text
 one JVM
- -> validate ALL ItemTypes
+ -> validate ALL ItemTypes using one bulk metadata snapshot
  -> one confirmation
  -> discard validation CM session
- -> sequential per-ItemType write
- -> commit
- -> reconnect/verify
+ -> sequential per-ItemType fresh-state write
+ -> commit/reconnect/verify
  -> next ItemType
 ```
 
-Backfill adds a guarded DB2 phase before assignment:
+Backfill in 0.3.5 uses:
 
 ```text
-plan/count
+detailed plan + Policy/Root fingerprints
  -> confirm
+ -> fresh ItemType/Policy/Root guard
+ -> cheap NULL-CREATETS preflight
  -> DB2 UPDATE
- -> DB2 COMMIT
- -> DB2 verification
+ -> DB2 COMMIT + residual verification
+ -> fresh post-COMMIT Policy/Root/ItemType guard
  -> policy assignment
- -> reconnect/verification
- -> final DB2 + policy verification
+ -> reconnect
+ -> final Policy/Root/assignment/DB2 verification
 ```
 
 A DB2 backfill and IBM-CM API assignment are not one distributed transaction. Partial-success conditions are surfaced explicitly instead of hidden.
@@ -621,8 +553,8 @@ A DB2 backfill and IBM-CM API assignment are not one distributed transaction. Pa
 | `2` | CLI, configuration, properties or preflight error |
 | `3` | IBM CM / DB2 runtime operation error |
 | `4` | requested ItemType or policy not found |
-| `5` | unsafe/conflicting operation refused |
-| `6` | verification warning/failure or partial-success condition |
+| `5` | unsafe/conflicting operation refused before a relevant write |
+| `6` | verification warning/failure or partial-success condition after persistence may have occurred |
 
 Scripts should always inspect the return code, especially `6`.
 
