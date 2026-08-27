@@ -6,23 +6,26 @@ All notable changes to `cm-retention` are documented here.
 
 Database-neutral existing-item backfill with Oracle support:
 
-- normal IBM CM SDK operations remain database-independent and continue to work unchanged
-- direct `--backfill` now supports both DB2 and Oracle-backed IBM Content Manager 8.7 library servers
+- normal IBM CM SDK operations remain available on DB2- and Oracle-backed IBM Content Manager 8.7 library servers
+- direct `--backfill` now supports both DB2 and Oracle 19c
 - added a small `BackfillDialect` abstraction instead of scattering database conditionals through the workflow
 - DB2 keeps the existing timestamp arithmetic (`CREATETS + N YEAR/MONTH/WEEK/DAY`)
-- Oracle uses `NUMTOYMINTERVAL` / `NUMTODSINTERVAL` and `CURRENT_TIMESTAMP`; WEEK is converted to the corresponding number of days
-- Oracle pre-write existence probes use `ROWNUM = 1`; DB2 keeps `FETCH FIRST 1 ROW ONLY`
+- Oracle follows IBM-style interval literals (`CREATETS + INTERVAL 'N' YEAR/MONTH/DAY`); WEEK is converted to days and interval leading precision is emitted when more than two digits are required
+- Oracle interval values requiring more than nine leading digits fail closed instead of generating invalid SQL
+- Oracle plans use `CURRENT_TIMESTAMP` and pre-write probes use `ROWNUM = 1`; DB2 keeps `CURRENT TIMESTAMP` and `FETCH FIRST 1 ROW ONLY`
 - JDBC database type is detected from `BACKFILL_JDBC_URL` (`jdbc:db2:` or `jdbc:oracle:`), or can be fixed with `BACKFILL_DB_TYPE=db2|oracle`
+- auto mode refuses ambiguous simultaneous `DB2_JDBC_URL` and `ORACLE_JDBC_URL` configuration
 - introduced preferred neutral settings: `BACKFILL_JDBC_URL`, `BACKFILL_USER`, `BACKFILL_PASSWORD`, `BACKFILL_SCHEMA`, `BACKFILL_JDBC_JAR`
 - existing DB2 installations remain backward compatible with `DB2_DATABASE`, `DB2_JDBC_URL`, `DB2_USER`, `DB2_PASSWORD`, `DB2_SCHEMA`, and `DB2_JDBC_JAR`
 - Oracle-specific aliases (`ORACLE_JDBC_URL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`, `ORACLE_JDBC_JAR`) are accepted, while `BACKFILL_*` is the recommended interface
-- Oracle backfill deliberately requires an explicit JDBC URL instead of guessing a listener/service from the CM alias
-- launcher can discover `ojdbc8.jar` under `ORACLE_HOME/jdbc/lib`, IBM/WAS locations, or an explicit `BACKFILL_JDBC_JAR`
+- Oracle backfill deliberately requires an explicit JDBC URL instead of guessing listener/service information from the CM alias
+- launcher reads `ORACLE_HOME` from `.env` and can discover `ojdbc8.jar` under `ORACLE_HOME/jdbc/lib`, IBM/WAS locations, or an explicit `BACKFILL_JDBC_JAR`
+- a missing direct-JDBC driver configuration is enforced for `--backfill`/`doctor` but no longer blocks ordinary CM-SDK commands
 - DB2 and Oracle JDBC driver class loading is selected dynamically; no Oracle classes are compile-time dependencies
-- all existing Policy/Root fingerprints, two-phase validation, post-COMMIT RC6 safety, residual-NULL verification, sequential batch semantics, and no-direct-delete guarantees remain unchanged
-- batch/backfill output and error text are now database-neutral and report the selected database where useful
-- pure self-test now covers DB2 and Oracle JDBC detection, interval SQL, current-timestamp syntax, one-row probes, and generated UPDATE/plan SQL without opening a database connection
-- runtime `.env.example`, build fallback configuration, and runtime installation text document both DB2 and Oracle
+- all Policy/Root fingerprints, two-phase validation, post-COMMIT RC6 safety, residual-NULL verification, sequential batch semantics, and no-direct-delete guarantees remain unchanged
+- added Oracle-specific 1y/5y/10y policy templates because IBM CM uses Oracle calendaring syntax for AUTO_DELETE schedules while DB2 uses cron syntax
+- pure self-test now covers DB2 and Oracle JDBC detection, interval SQL/precision, current-timestamp syntax, one-row probes, and generated UPDATE/plan SQL without opening a database connection
+- runtime `.env.example`, build fallback configuration, runtime installation text, README, operations guide, troubleshooting, and backfill documentation cover both DB2 and Oracle
 - bumped runtime/package version to `0.4.0`
 
 ## 0.3.5
