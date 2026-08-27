@@ -89,7 +89,13 @@ final class BackfillWorkflow {
                     postBackfillExit);
         } catch (Exception e) {
             assignmentProblem = e;
-            printEmbeddedProblem("Policy assignment", e);
+            // OperationWarning already means CmService verified that the requested
+            // assignment persisted. Keep it pending until the stronger final
+            // Policy/Root/NULL verification below completes. Other exceptions are
+            // still reported immediately and remain fail-closed.
+            if (!(e instanceof OperationWarning)) {
+                printEmbeddedProblem("Policy assignment", e);
+            }
         }
         long cmNanos = Timing.elapsed(cmStarted);
 
@@ -118,12 +124,39 @@ final class BackfillWorkflow {
         }
         long verifyNanos = Timing.elapsed(verifyStarted);
 
-        if (assignmentProblem != null || verificationProblem != null) {
+        if (verificationProblem != null) {
+            if (assignmentProblem instanceof OperationWarning) {
+                printEmbeddedProblem("Policy assignment", assignmentProblem);
+            }
             throw new CliException("Backfill phase completed for " + validated.itemTypeName
-                    + ", but assignment/final verification was not a clean success."
+                    + ", but final verification was not a clean success."
                     + " Review the ItemType and database state before retrying.", 6);
         }
 
+        if (assignmentProblem != null && !(assignmentProblem instanceof OperationWarning)) {
+            throw new CliException("Backfill phase completed for " + validated.itemTypeName
+                    + ", but policy assignment was not a clean success."
+                    + " Review the ItemType and database state before retrying.", 6);
+        }
+
+        printTiming(backfill, preflightNanos, dbNanos, guardNanos, cmNanos, verifyNanos, totalStarted);
+
+        if (assignmentProblem instanceof OperationWarning) {
+            // The assignment produced a secondary IBM CM error, but both the
+            // assignment and the complete backfill state were verified afterwards.
+            // Surface a verified warning so single-item mode still returns RC6,
+            // while BatchMain may safely continue with later ItemTypes.
+            throw (OperationWarning) assignmentProblem;
+        }
+    }
+
+    private static void printTiming(BackfillService backfill,
+                                    long preflightNanos,
+                                    long dbNanos,
+                                    long guardNanos,
+                                    long cmNanos,
+                                    long verifyNanos,
+                                    long totalStarted) {
         System.out.println("Timing                    : preflight " + Timing.format(preflightNanos)
                 + " / " + backfill.databaseDisplayName() + " " + Timing.format(dbNanos)
                 + " / post-commit guard " + Timing.format(guardNanos)
