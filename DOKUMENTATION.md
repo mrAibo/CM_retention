@@ -1,4 +1,4 @@
-# cm-retention 0.4.0 – Betriebs- und Benutzerdokumentation
+# cm-retention 0.4.1 – Betriebs- und Benutzerdokumentation
 
 ## 1. Zweck
 
@@ -14,6 +14,7 @@ Unterstützt werden:
 - Existing-Item-Backfill mit `--backfill`
 - direkter Backfill auf DB2 und Oracle 19c
 - Policy-/Root-Fingerprints und Post-COMMIT-Schutz
+- verifizierte IBM-CM-Sekundärwarnungen im Batch ohne unnötigen Abbruch
 - Laufzeitmessungen
 - reiner Regressionstest mit `selftest`
 
@@ -32,7 +33,7 @@ assign / unassign
 --file ohne --backfill
 ```
 
-Der direkte `--backfill` unterstützt ab 0.4.0:
+Der direkte `--backfill` unterstützt seit 0.4.0:
 
 | Library-Server-DB | Normale CM-Befehle | `--backfill` |
 |---|---:|---:|
@@ -86,11 +87,11 @@ bin/cm-retention selftest
 Erwartet:
 
 ```text
-cm-retention 0.4.0
+cm-retention 0.4.1
 Self-test: OK (... checks)
 ```
 
-Der Self-Test meldet sich nicht an Content Manager an und öffnet keine direkte DB2-/Oracle-Verbindung. Geprüft werden unter anderem Parser, Template-Erkennung, Fingerprints, `CREATETS`, DB2-/Oracle-SQL-Dialekte und Sekunden-Einheiten.
+Der Self-Test meldet sich nicht an Content Manager an und öffnet keine direkte DB2-/Oracle-Verbindung. Geprüft werden unter anderem Parser, Template-Erkennung, Fingerprints, `CREATETS`, DB2-/Oracle-SQL-Dialekte, Warning-Summary und Sekunden-Einheiten.
 
 ## 4. Policy-Vorlagen
 
@@ -203,6 +204,69 @@ bin/cm-retention unassign AM
 
 Ohne `--backfill` werden bestehende Dokument-Metadaten nicht verändert. Writes behalten stale-state- und reconnect/persisted-state-Verifikation.
 
+### 6.1 IBM-CM-Sekundärfehler nach bereits persistiertem Write
+
+Bei älteren ItemTypes kann IBM CM nach einem erfolgreichen Assign/Unassign noch einen SDK-Fehler melden, beispielsweise:
+
+```text
+DGL0303A: Ungültiger Parameter.
+DKAttrDefICM::getViewOperator() opCode : [-1]
+```
+
+`CmService` behandelt dies nicht automatisch als Erfolg. Nach dem SDK-Fehler wird eine neue CM-Session geöffnet und der persistierte Policy-Zustand erneut gelesen.
+
+Nur wenn der angeforderte Zustand tatsächlich bestätigt wurde, entsteht eine `OperationWarning`:
+
+```text
+Policy AUTO_DELETE_1Y was removed from itemtype AM,
+but IBM CM reported a secondary error after persisting the change.
+```
+
+Ein Einzelbefehl liefert dafür weiterhin Exit `6`.
+
+Ab 0.4.1 gilt für `--file`:
+
+```text
+OperationWarning + gewünschter Zustand verifiziert
+  -> Warning protokollieren
+  -> ItemType als verified zählen
+  -> Batch fortsetzen
+  -> Gesamt-RC am Ende 6
+
+Zustand nicht verifizierbar / anderer Fehler
+  -> Batch sofort stoppen
+```
+
+Damit wird ein Legacy-Metadatenproblem nicht verschluckt, aber ein großer Batch muss nach einem bereits erfolgreich persistierten Sekundärfehler nicht unnötig abgebrochen werden.
+
+### 6.2 Bereits zugewiesene AUTO_DELETE-Policy ändern
+
+Bei einer bereits vielen ItemTypes zugewiesenen AUTO_DELETE-Policy sollte eine nachträgliche Änderung von Schedule oder anderen Auto-Delete-Einstellungen kontrolliert erfolgen. In realen CM-8.7-Umgebungen können die per-ItemType Automatic-Delete-Tasks/Schedules sonst nicht wie erwartet neu aufgebaut werden.
+
+Besonders relevant sind:
+
+```text
+expiration.age
+auto-delete.schedule
+auto-delete.commit-count
+auto-delete.max-items
+auto-delete.max-duration
+auto-delete.force-checkin
+```
+
+Empfohlener Ablauf:
+
+```text
+1. betroffene ItemTypes prüfen
+2. Policy unassignen
+3. Policy ändern oder neue Policy erstellen
+4. Policy erneut assignen
+5. Automatic-Delete-Tasks/Schedule prüfen
+6. --backfill nur verwenden, wenn Existing-Item-Daten tatsächlich gesetzt/repariert werden müssen
+```
+
+Eine Neuzuweisung berechnet bereits vorhandene `ICM$AUTODELETEDATE`-Werte nicht automatisch neu.
+
 ## 7. Existing-Item-Backfill
 
 Immer zuerst:
@@ -214,7 +278,7 @@ bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 Der Single-Item-Dry-run zeigt die ausgewählte direkte Datenbank vor dem Detailplan explizit an:
 
 ```text
-Backfill database           : Oracle
+Backfill database           : DB2
 ```
 
 Die logische Operation lautet:
@@ -354,6 +418,8 @@ detailed plan + fingerprints
 
 Direkter DB-Backfill und IBM-CM-Assignment sind keine verteilte gemeinsame Transaktion. Ein Fehler nach DB-COMMIT kann deshalb einen Partial-Success-Zustand erzeugen. Dieser wird mit Exit `6` sichtbar gemacht.
 
+Eine `OperationWarning` aus dem Assignment wird im Backfill erst dann als **verified warning** an den Batch weitergegeben, wenn anschließend auch Policy-Fingerprint, Root-Fingerprint, Assignment und residual NULL rows vollständig verifiziert wurden. Andere RC6-Zustände bleiben fail-closed.
+
 ## 8. Backfill-Konfiguration
 
 Normale Non-Backfill-Befehle benötigen diese Werte nicht. Ein fehlerhaft konfigurierter direct-JDBC-Pfad blockiert `--backfill` bzw. wird durch `doctor` angezeigt, aber blockiert keine normalen CM-SDK-Kommandos.
@@ -437,31 +503,49 @@ Dry-run:
 
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --dry-run
+bin/cm-retention unassign --file itemtypes.txt --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 ```
 
 Reale Ausführung:
 
 ```bash
+bin/cm-retention unassign --file itemtypes.txt --yes
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --yes
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-Der gesamte Batch läuft in einem JVM-Prozess. Bei Backfill wird eine direkte JDBC-Verbindung über den Batch wiederverwendet. Phase 1 validiert alle ItemTypes vor dem ersten Write. Phase 2 bleibt:
+Der gesamte Batch läuft in einem JVM-Prozess. Bei Backfill wird eine direkte JDBC-Verbindung über den Batch wiederverwendet. Phase 1 validiert alle ItemTypes vor dem ersten Write.
+
+Phase 2 bleibt:
 
 ```text
 sequenziell
-fail-fast
 nicht atomar
+echte Laufzeit-/Verifikationsfehler: fail-fast
+verifizierte IBM-CM-Sekundärwarnungen: protokollieren und fortsetzen
 ```
 
 Es gibt keine parallelen DB2-/Oracle-UPDATEs.
 
-Der Header zeigt die ausgewählte Datenbank:
+Bei ausschließlich sauberen Ergebnissen endet der Batch mit RC `0`. Wenn mindestens eine verifizierte Sekundärwarnung auftrat, aber alle ItemTypes den gewünschten finalen Zustand erreicht haben, sieht die Zusammenfassung beispielsweise so aus:
+
+```text
+Batch complete: 217/217 item types reached a verified final state.
+Clean success     : 180
+Verified warnings : 37
+Warning itemtypes : AM, ...
+Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.
+```
+
+Die Liste der Warning-ItemTypes wird kompakt begrenzt; der Zähler bleibt vollständig. Der Batch liefert dann RC `6`, obwohl er alle angeforderten ItemTypes abgearbeitet hat.
+
+Der Backfill-Header zeigt die ausgewählte Datenbank:
 
 ```text
 Batch mode (native Java runtime)
   Backfill  : yes
-  Database  : Oracle
+  Database  : DB2
   Runtime   : single JVM
 ```
 
@@ -475,16 +559,16 @@ Auf einem CM-8.7-Host mit echter `cmbicmsdk81.jar`:
 
 Der Build führt `SelfTestMain` vor dem Packaging aus.
 
-0.4.0 erzeugt:
+0.4.1 erzeugt:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.4.0.jar
+build/cm-retention-0.4.1.jar
 build/.version
 build/ret-policy.properties
 build/profiles/*.properties
-build/cm-retention-0.4.0-runtime.tar.gz
-build/SHA256SUMS-0.4.0
+build/cm-retention-0.4.1-runtime.tar.gz
+build/SHA256SUMS-0.4.1
 ```
 
 Das Runtime-Paket enthält keine IBM-SDK-/DB2-/Oracle-JARs und keine Credentials.
@@ -492,8 +576,8 @@ Das Runtime-Paket enthält keine IBM-SDK-/DB2-/Oracle-JARs und keine Credentials
 ## 11. Installation ohne Git
 
 ```bash
-tar -xzf cm-retention-0.4.0-runtime.tar.gz
-cd cm-retention-0.4.0
+tar -xzf cm-retention-0.4.1-runtime.tar.gz
+cd cm-retention-0.4.1
 cp .env.example .env
 chmod 600 .env
 vi .env
@@ -539,6 +623,14 @@ time bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 time bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 ```
 
+Bei Legacy-ItemTypes zusätzlich einen kleinen Assign/Unassign-Batch prüfen und den Return Code kontrollieren:
+
+```bash
+bin/cm-retention unassign --file itemtypes.txt --dry-run
+bin/cm-retention unassign --file itemtypes.txt --yes
+echo $?
+```
+
 Prüfen:
 
 - richtige Datenbank (`DB2` oder `Oracle`)
@@ -547,6 +639,7 @@ Prüfen:
 - `NULL create timestamp = 0`
 - `Immediately expired after`
 - Timing der Plan-Phase
+- bei Batch: `Clean success`, `Verified warnings` und finalen RC
 
 ## 13. Sicherheitsmodell
 
@@ -575,7 +668,9 @@ Wichtige Regeln:
 - bestehende Retention-/AutoDelete-Daten werden nicht überschrieben
 - kein direktes Dokument-DELETE
 - keine parallelen Datenbank-Writes
-- Exit `6` bedeutet: Persistenz/Partial-Success möglich; Zustand prüfen
+- verifizierte `OperationWarning` ist kein stiller Erfolg: sie bleibt sichtbar und führt im Batch-Summary zu RC `6`
+- nicht verifizierbare Fehler bleiben fail-fast
+- Exit `6` bedeutet weiterhin: Warnung bzw. Zustand nach Persistenz/Partial-Success administrativ prüfen
 
 ## 14. Exit-Codes
 
@@ -586,7 +681,7 @@ Wichtige Regeln:
 | 3 | IBM-CM-/Datenbank-Laufzeitfehler |
 | 4 | ItemType/Policy nicht gefunden |
 | 5 | unsichere/widersprüchliche Operation vor relevantem Write verweigert |
-| 6 | Verifikationswarnung / Partial-Success / Zustand nach möglicher Persistenz prüfen |
+| 6 | verifizierte IBM-CM-Sekundärwarnung / Verifikationswarnung / Partial-Success-Zustand nach möglicher Persistenz |
 
 ## 15. Weiterführende Dokumentation
 
