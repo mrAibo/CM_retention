@@ -135,7 +135,7 @@ if [[ -f "$ENV_FILE" ]]; then
     export CM_RETENTION_ENV_FILE="$ENV_FILE"
 fi
 
-# Optional DB2 JCC driver used by the explicit --backfill workflow.
+# Optional DB2 JCC driver used by explicit --backfill workflows.
 DB2_JDBC_JAR=$(read_env_value DB2_JDBC_JAR "$ENV_FILE")
 if [[ -n "$DB2_JDBC_JAR" ]]; then
     [[ -f "$DB2_JDBC_JAR" ]] || preflight_fail "DB2 JDBC driver" "DB2_JDBC_JAR does not exist: $DB2_JDBC_JAR"
@@ -169,14 +169,11 @@ run_backfill() {
     "$JAVA" -cp "$CLASSPATH" BackfillMain "$@"
 }
 
-trim_line() {
-    local value=$1
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    printf '%s' "$value"
+run_batch() {
+    "$JAVA" -cp "$CLASSPATH" BatchMain "$@"
 }
 
-approve_batch_or_single() {
+approve_single() {
     local assume_yes=$1
     local prompt=$2
     if [[ $assume_yes -eq 1 ]]; then
@@ -199,12 +196,10 @@ apply_backfill_assignment() {
     local item=$1 policy=$2
     local assign_rc=0 verify_rc=0
 
-    local backfill_rc=0
     if run_backfill apply "$item" "$policy"; then
-        backfill_rc=0
+        :
     else
-        backfill_rc=$?
-        return "$backfill_rc"
+        return $?
     fi
 
     if run_java assign "$item" "$policy" --yes; then
@@ -221,7 +216,7 @@ apply_backfill_assignment() {
 
     if [[ $assign_rc -ne 0 || $verify_rc -ne 0 ]]; then
         echo "WARNING: backfill was committed, but assignment/final verification was not a clean success." >&2
-        echo "Review the itemtype and rerun the same --backfill command after resolving the cause." >&2
+        echo "Review the ItemType and rerun the same --backfill command after resolving the cause." >&2
         return 6
     fi
     return 0
@@ -279,7 +274,7 @@ run_single_backfill_assign() {
 
     echo
     echo "IMPORTANT: existing rows whose calculated date is already in the past become immediately eligible for AUTO_DELETE after policy assignment."
-    if approve_batch_or_single "$assume_yes" "Backfill existing rows and assign $policy to $item?"; then
+    if approve_single "$assume_yes" "Backfill existing rows and assign $policy to $item?"; then
         :
     else
         local approval_rc=$?
@@ -289,206 +284,6 @@ run_single_backfill_assign() {
 
     echo
     apply_backfill_assignment "$item" "$policy"
-}
-
-run_file_batch() {
-    local command=$1
-    shift
-
-    local file=""
-    local policy=""
-    local assume_yes=0
-    local dry_run=0
-    local backfill=0
-    local -a positional=()
-
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --file)
-                [[ -z "$file" ]] || { echo "ERROR: duplicate option --file" >&2; return 2; }
-                [[ $# -ge 2 ]] || { echo "ERROR: --file requires a path" >&2; return 2; }
-                file=$2
-                shift 2
-                ;;
-            --backfill)
-                [[ $backfill -eq 0 ]] || { echo "ERROR: duplicate flag --backfill" >&2; return 2; }
-                backfill=1
-                shift
-                ;;
-            --yes)
-                [[ $assume_yes -eq 0 ]] || { echo "ERROR: duplicate flag --yes" >&2; return 2; }
-                assume_yes=1
-                shift
-                ;;
-            --dry-run)
-                [[ $dry_run -eq 0 ]] || { echo "ERROR: duplicate flag --dry-run" >&2; return 2; }
-                dry_run=1
-                shift
-                ;;
-            --*)
-                echo "ERROR: unknown batch option '$1'" >&2
-                return 2
-                ;;
-            *)
-                positional+=("$1")
-                shift
-                ;;
-        esac
-    done
-
-    [[ -n "$file" ]] || { echo "ERROR: --file is required for batch mode" >&2; return 2; }
-    [[ -f "$file" && -r "$file" ]] || { echo "ERROR: itemtype file is not readable: $file" >&2; return 2; }
-
-    if [[ "$command" == assign ]]; then
-        [[ ${#positional[@]} -eq 1 ]] || {
-            echo "ERROR: usage: cm-retention assign --file ITEMTYPES.txt POLICY [--backfill] [--dry-run|--yes]" >&2
-            return 2
-        }
-        policy=${positional[0]}
-    else
-        [[ $backfill -eq 0 ]] || { echo "ERROR: --backfill is supported only with assign" >&2; return 2; }
-        [[ ${#positional[@]} -eq 0 ]] || {
-            echo "ERROR: usage: cm-retention unassign --file ITEMTYPES.txt [--dry-run|--yes]" >&2
-            return 2
-        }
-    fi
-
-    local -a itemtypes=()
-    local line item existing duplicate
-    local lineno=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        lineno=$((lineno + 1))
-        item=$(trim_line "$line")
-        [[ -n "$item" ]] || continue
-        [[ "$item" == \#* ]] && continue
-
-        duplicate=0
-        for existing in "${itemtypes[@]}"; do
-            if [[ "$existing" == "$item" ]]; then
-                duplicate=1
-                break
-            fi
-        done
-        if [[ $duplicate -eq 1 ]]; then
-            echo "ERROR: duplicate itemtype '$item' in $file (line $lineno)" >&2
-            return 2
-        fi
-        itemtypes+=("$item")
-    done < "$file"
-
-    [[ ${#itemtypes[@]} -gt 0 ]] || { echo "ERROR: no itemtypes found in $file" >&2; return 2; }
-
-    echo "Batch mode"
-    echo "  Operation : $command"
-    echo "  File      : $file"
-    echo "  Item types: ${#itemtypes[@]}"
-    if [[ "$command" == assign ]]; then
-        echo "  Policy    : $policy"
-        echo "  Backfill  : $([[ $backfill -eq 1 ]] && echo yes || echo no)"
-    fi
-    echo
-    echo "Phase 1/2: validating every item type (no changes)"
-    echo
-
-    local index=0 rc
-    for item in "${itemtypes[@]}"; do
-        index=$((index + 1))
-        echo "--- [$index/${#itemtypes[@]}] $item ---"
-        if [[ "$command" == assign ]]; then
-            if [[ $backfill -eq 1 ]]; then
-                if run_backfill plan "$item" "$policy"; then
-                    :
-                else
-                    rc=$?
-                    echo "ERROR: batch backfill validation failed for '$item'. No batch changes were made." >&2
-                    return "$rc"
-                fi
-            else
-                if run_java assign "$item" "$policy" --dry-run; then
-                    :
-                else
-                    rc=$?
-                    echo "ERROR: batch validation failed for '$item'. No batch changes were made." >&2
-                    return "$rc"
-                fi
-            fi
-        else
-            if run_java unassign "$item" --dry-run; then
-                :
-            else
-                rc=$?
-                echo "ERROR: batch validation failed for '$item'. No batch changes were made." >&2
-                return "$rc"
-            fi
-        fi
-        echo
-    done
-
-    echo "Validation: OK (${#itemtypes[@]} item types)"
-
-    if [[ $dry_run -eq 1 ]]; then
-        echo "DRY RUN: batch validation complete. No changes made."
-        return 0
-    fi
-
-    echo
-    echo "NOTE: batch execution is sequential, not atomic."
-    echo "If a runtime error occurs, processing stops immediately, but earlier successful changes remain committed."
-    if [[ $backfill -eq 1 ]]; then
-        echo "Each itemtype is processed as: DB2 backfill -> verify -> policy assignment -> final verify."
-    fi
-
-    if approve_batch_or_single "$assume_yes" "Apply batch to ${#itemtypes[@]} item types?"; then
-        :
-    else
-        local approval_rc=$?
-        [[ $approval_rc -eq 1 ]] && return 0
-        return "$approval_rc"
-    fi
-
-    echo
-    echo "Phase 2/2: applying changes"
-    echo
-
-    local completed=0
-    index=0
-    for item in "${itemtypes[@]}"; do
-        index=$((index + 1))
-        echo "--- [$index/${#itemtypes[@]}] $item ---"
-        if [[ "$command" == assign ]]; then
-            if [[ $backfill -eq 1 ]]; then
-                if apply_backfill_assignment "$item" "$policy"; then
-                    completed=$((completed + 1))
-                else
-                    rc=$?
-                    echo "ERROR: batch stopped at '$item' after $completed fully verified item(s)." >&2
-                    echo "Earlier successful changes remain committed; the current item may have a committed backfill." >&2
-                    return "$rc"
-                fi
-            else
-                if run_java assign "$item" "$policy" --yes; then
-                    completed=$((completed + 1))
-                else
-                    rc=$?
-                    echo "ERROR: batch stopped at '$item' after $completed successful item(s)." >&2
-                    echo "Earlier successful changes remain committed; review status before retrying." >&2
-                    return "$rc"
-                fi
-            fi
-        else
-            if run_java unassign "$item" --yes; then
-                completed=$((completed + 1))
-            else
-                rc=$?
-                echo "ERROR: batch stopped at '$item' after $completed successful item(s)." >&2
-                echo "Earlier successful changes remain committed; review status before retrying." >&2
-                return "$rc"
-            fi
-        fi
-        echo
-    done
-
-    echo "Batch complete: $completed/${#itemtypes[@]} item types processed successfully."
 }
 
 HAS_FILE=0
@@ -501,7 +296,7 @@ done
 if [[ $HAS_FILE -eq 1 ]]; then
     case ${1:-} in
         assign|unassign)
-            run_file_batch "$@"
+            run_batch "$@"
             exit $?
             ;;
         *)
