@@ -2,7 +2,7 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.4.0**
+Current version: **0.4.1**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no direct document-delete command.
 
@@ -46,6 +46,7 @@ The expiration/retention semantics are identical; only the automatic-delete sche
 - guarded existing-item `--backfill` before assignment
 - direct backfill against DB2 or Oracle
 - Policy/Root fingerprints around database/CM transaction boundaries
+- verified-warning continuation for IBM CM secondary errors in batch mode
 - phase and ItemType timings
 - pure `selftest` regression checks
 - runtime tarball for hosts without Git or `javac`
@@ -102,6 +103,30 @@ Assigned itemtypes:         3
 ```
 
 `Auto-delete max. duration` is displayed in **seconds**.
+
+## Changing an already-assigned AUTO_DELETE policy
+
+Treat live changes to an already-assigned AUTO_DELETE policy conservatively, especially changes to:
+
+```text
+expiration.age
+auto-delete.schedule
+auto-delete.commit-count
+auto-delete.max-items
+auto-delete.max-duration
+auto-delete.force-checkin
+```
+
+On IBM CM 8.7 the per-ItemType automatic-delete scheduler/task state may not be rebuilt consistently just because the shared Policy object was edited. The safe operational pattern is:
+
+```text
+unassign affected ItemTypes
+-> change/recreate the policy
+-> assign affected ItemTypes again
+-> use --backfill only when existing-item dates must be populated/repaired
+```
+
+For semantic changes such as a different expiration age, creating a new Policy is usually clearer than mutating a heavily used one. Existing `ICM$AUTODELETEDATE` values are not silently recalculated by a normal unassign/assign.
 
 ---
 
@@ -188,16 +213,16 @@ Build on a compatible CM 8.7 host:
 
 The build compiles all Java sources and runs `SelfTestMain` before creating artifacts. The self-test loads IBM CM SDK classes but does **not** log in to Content Manager and does **not** open a DB2/Oracle JDBC connection.
 
-Version 0.4.0 produces:
+Version 0.4.1 produces:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.4.0.jar
+build/cm-retention-0.4.1.jar
 build/.version
 build/ret-policy.properties
 build/profiles/*.properties
-build/cm-retention-0.4.0-runtime.tar.gz
-build/SHA256SUMS-0.4.0
+build/cm-retention-0.4.1-runtime.tar.gz
+build/SHA256SUMS-0.4.1
 ```
 
 Verify:
@@ -212,8 +237,8 @@ bin/cm-retention doctor
 Expected version:
 
 ```text
-0.4.0
-cm-retention 0.4.0
+0.4.1
+cm-retention 0.4.1
 ```
 
 The runtime bundle contains no IBM SDK, JDBC driver, or credentials.
@@ -325,7 +350,7 @@ It also:
 - revalidates before UPDATE, after database COMMIT, and during final verification
 - verifies residual NULL rows before policy assignment
 - returns exit `6` for persisted/partial-success conditions after a relevant COMMIT
-- keeps batch writes sequential and fail-fast
+- keeps batch writes sequential
 
 The direct database UPDATE and IBM CM API assignment are **not one distributed transaction**.
 
@@ -395,11 +420,44 @@ CONTRACT
 
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --dry-run
+bin/cm-retention unassign --file itemtypes.txt --yes
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --yes
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-The complete file workflow runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates every ItemType before the first mutation. Phase 2 remains sequential, fail-fast, and non-atomic.
+The complete file workflow runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates every ItemType before the first mutation. Phase 2 remains sequential and non-atomic.
+
+## Verified secondary IBM CM warnings in 0.4.1
+
+Older CM metadata can produce a secondary error after IBM CM has already persisted the requested assignment change, for example:
+
+```text
+DGL0303A: Invalid parameter
+DKAttrDefICM::getViewOperator() opCode : [-1]
+```
+
+`CmService` already reconnects and verifies the requested persisted state before raising `OperationWarning`. Starting with 0.4.1, batch mode treats that state separately from a real failure:
+
+```text
+clean success     -> continue
+verified warning  -> report, continue, final RC 6
+real/uncertain failure -> stop immediately
+```
+
+Example final summary:
+
+```text
+Batch complete: 217/217 item types reached a verified final state.
+Clean success     : 180
+Verified warnings : 37
+Warning itemtypes : AM, ...
+Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.
+```
+
+The warning list is capped in the final summary so large legacy environments do not produce another huge block; each warning is still printed at the ItemType where it occurred.
+
+For `--file --backfill`, continuation is allowed only when the secondary assignment warning is followed by a successful complete final Policy/Root/assignment/residual-NULL verification. A backfill RC6 whose final state is uncertain still stops the batch immediately.
 
 The backfill batch header reports the selected database, for example:
 
@@ -421,9 +479,9 @@ Batch mode (native Java runtime)
 | `3` | IBM CM / database runtime error |
 | `4` | ItemType or policy not found |
 | `5` | unsafe/conflicting operation refused before a relevant write |
-| `6` | verification warning/failure or partial-success state after persistence may have occurred |
+| `6` | verified IBM CM secondary warning, verification warning/failure, or partial-success state after persistence may have occurred |
 
-Scripts should always inspect the return code, especially `6`.
+A batch may therefore process its complete file and still return `6` when every requested state was verified but one or more IBM CM secondary warnings occurred. Scripts should inspect both the summary and the return code.
 
 ---
 
