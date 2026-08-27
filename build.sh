@@ -35,13 +35,16 @@ fi
 IBMCMROOT=${IBMCMROOT:-/opt/IBM/db2cmv8}
 JAVA_HOME=${JAVA_HOME:-/opt/IBM/WebSphere/AppServer/java/8.0}
 
+JAVA=${JAVA_HOME}/bin/java
 JAVAC=${JAVA_HOME}/bin/javac
 JAR=${JAVA_HOME}/bin/jar
+[[ -x "$JAVA" ]] || { echo "ERROR: java not found: $JAVA" >&2; exit 2; }
 [[ -x "$JAVAC" ]] || { echo "ERROR: javac not found: $JAVAC" >&2; exit 2; }
 [[ -x "$JAR" ]] || { echo "ERROR: jar not found: $JAR" >&2; exit 2; }
 [[ -f "${IBMCMROOT}/lib/cmbicmsdk81.jar" ]] || { echo "ERROR: IBM CM SDK not found under ${IBMCMROOT}/lib" >&2; exit 2; }
 [[ -f "${ROOT}/ret-policy.properties" ]] || { echo "ERROR: missing ret-policy.properties" >&2; exit 2; }
 [[ -d "${ROOT}/profiles" ]] || { echo "ERROR: missing profiles directory" >&2; exit 2; }
+[[ -f "${ROOT}/tests/selftest.sh" ]] || { echo "ERROR: missing tests/selftest.sh" >&2; exit 2; }
 command -v tar >/dev/null 2>&1 || { echo "ERROR: tar is required to create the runtime package" >&2; exit 2; }
 
 rm -rf "${BUILD_DIR}/classes" "${BUILD_DIR}/runtime" "${BUILD_DIR}/profiles"
@@ -60,6 +63,12 @@ mkdir -p "${BUILD_DIR}/classes"
     -cp "${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*" \
     -d "${BUILD_DIR}/classes" \
     "${ROOT}/src/"*.java
+
+# Pure regression checks. They load SDK classes but do not connect to CM or DB2.
+echo "Running self-test..."
+SELFTEST_CP="${BUILD_DIR}/classes:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*"
+LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    "$JAVA" -cp "$SELFTEST_CP" SelfTestMain
 
 cat > "${BUILD_DIR}/manifest.mf" <<MANIFEST
 Manifest-Version: 1.0
@@ -111,7 +120,8 @@ RUNTIME_NAME="cm-retention-${APP_VERSION}"
 RUNTIME_STAGE="${BUILD_DIR}/runtime/${RUNTIME_NAME}"
 RUNTIME_TAR="${BUILD_DIR}/${RUNTIME_NAME}-runtime.tar.gz"
 
-mkdir -p "${RUNTIME_STAGE}/bin" "${RUNTIME_STAGE}/build" "${RUNTIME_STAGE}/docs" "${RUNTIME_STAGE}/profiles"
+mkdir -p "${RUNTIME_STAGE}/bin" "${RUNTIME_STAGE}/build" "${RUNTIME_STAGE}/docs" \
+    "${RUNTIME_STAGE}/profiles" "${RUNTIME_STAGE}/tests"
 cp "${ROOT}/bin/cm-retention" "${RUNTIME_STAGE}/bin/cm-retention"
 chmod 755 "${RUNTIME_STAGE}/bin/cm-retention"
 cp "$CURRENT_JAR" "${RUNTIME_STAGE}/build/cm-retention.jar"
@@ -122,6 +132,8 @@ cp "${ROOT}/profiles/"*.properties "${RUNTIME_STAGE}/profiles/"
 cp "$BUILD_ENV_EXAMPLE" "${RUNTIME_STAGE}/.env.example"
 cp "${ROOT}/README.md" "${ROOT}/DOKUMENTATION.md" "${ROOT}/CHANGELOG.md" "${RUNTIME_STAGE}/"
 cp "${ROOT}/docs/"*.md "${RUNTIME_STAGE}/docs/"
+cp "${ROOT}/tests/selftest.sh" "${RUNTIME_STAGE}/tests/selftest.sh"
+chmod 755 "${RUNTIME_STAGE}/tests/selftest.sh"
 
 cat > "${RUNTIME_STAGE}/INSTALL_RUNTIME.txt" <<EOF
 CM Retention ${APP_VERSION} - precompiled runtime installation
@@ -140,9 +152,10 @@ Installation:
        vi .env
   4. Review ret-policy.properties and profiles/*.properties.
      Default AUTO_DELETE force-checkin is true.
-  5. Verify the packaged version:
+  5. Verify the packaged version and pure self-test:
        cat build/.version
        bin/cm-retention version
+       bin/cm-retention selftest
   6. Verify the target IBM CM environment:
        bin/cm-retention doctor
        bin/cm-retention status
@@ -173,6 +186,7 @@ else
 fi
 
 printf 'Built version:  %s\n' "$APP_VERSION"
+printf 'Self-test:      %s\n' "passed"
 printf 'Runtime JAR:    %s\n' "$CURRENT_JAR"
 printf 'Versioned JAR:  %s\n' "$VERSIONED_JAR"
 printf 'Version file:   %s\n' "${BUILD_DIR}/.version"
