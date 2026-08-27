@@ -22,6 +22,7 @@ public final class SelfTestMain {
         testFingerprints();
         testBackfillSql();
         testBackfillDialects();
+        testBatchWarningSummary();
         testTimingFormat();
         System.out.println("Self-test: OK (" + checks + " checks)");
     }
@@ -154,6 +155,14 @@ public final class SelfTestMain {
             tooLargeRejected = e.exitCode == 5;
         }
         assertTrue(tooLargeRejected, "Oracle interval precision overflow refused");
+    }
+
+    private static void testBatchWarningSummary() {
+        assertTrue("AM, CONTRACT ... (+1 more)".equals(
+                BatchMain.formatWarningItems(Arrays.asList("AM", "CONTRACT", "INVOICE"), 2)),
+                "batch warning list is compact");
+        assertTrue("-".equals(BatchMain.formatWarningItems(Arrays.<String>asList(), 20)),
+                "empty batch warning list");
     }
 
     private static void testTimingFormat() {
