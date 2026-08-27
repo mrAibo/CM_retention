@@ -16,6 +16,10 @@ final class Db2ChunkedBackfill {
     static final int DEFAULT_CHUNK_ROWS = 250000;
     static final int MIN_CHUNK_ROWS = 10000;
 
+    interface CommitGuard {
+        void verify(long committedRows) throws Exception;
+    }
+
     private Db2ChunkedBackfill() { }
 
     static boolean shouldUse(BackfillService backfill, BackfillWritePlan plan) {
@@ -23,7 +27,7 @@ final class Db2ChunkedBackfill {
                 && plan.plannedFillableRows > MIN_CHUNK_ROWS;
     }
 
-    static BackfillResult apply(BackfillWritePlan plan) throws Exception {
+    static BackfillResult apply(BackfillWritePlan plan, CommitGuard guard) throws Exception {
         Config base = Config.fromEnvironment();
         BackfillConfig config = BackfillConfig.from(base);
         if (!"db2".equals(config.dialect.id())) {
@@ -88,6 +92,18 @@ final class Db2ChunkedBackfill {
                 System.out.println("  Chunk " + chunkNumber + " committed : " + updated
                         + " row(s); total " + totalUpdated + progress(plan.plannedFillableRows, totalUpdated)
                         + " / " + Timing.since(chunkStarted));
+
+                if (updated > 0 && guard != null) {
+                    try {
+                        guard.verify(totalUpdated);
+                    } catch (Exception e) {
+                        BackfillWorkflow.printEmbeddedProblem("Chunk post-COMMIT safety guard", e);
+                        throw new CliException("DB2 backfill committed " + totalUpdated
+                                + " row(s), but the post-COMMIT safety guard failed."
+                                + " Policy assignment was not started; review the current policy,"
+                                + " ItemType and root metadata before retrying.", 6);
+                    }
+                }
 
                 // FETCH FIRST limits each UPDATE. Fewer rows than the current
                 // limit proves that this statement consumed the remaining
