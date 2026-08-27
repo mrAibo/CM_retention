@@ -40,8 +40,9 @@ public final class BackfillMain {
                 System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
                 System.out.println("Remaining NULL rows: " + result.remainingRows);
             } else if ("verify".equals(action)) {
-                BackfillPlan plan = backfill.plan(itemType, policy, current, policyName);
-                validateSegment(plan);
+                // remainingMissing() also validates the target assignment,
+                // supported policy semantics, root component and SegmentID.
+                // Avoid rebuilding the full seven-counter plan just to verify.
                 long remaining = backfill.remainingMissing(itemType, policy, current, policyName);
                 if (remaining != 0) {
                     throw new CliException("Backfill verification failed: " + remaining
