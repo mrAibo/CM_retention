@@ -12,7 +12,7 @@ Unterstützt werden:
 - Assign/Unassign und Dry-run
 - Batch-Verarbeitung mit `--file` in einem JVM-Prozess
 - Existing-Item-Backfill mit `--backfill`
-- direkter Backfill auf DB2 **und Oracle 19c**
+- direkter Backfill auf DB2 und Oracle 19c
 - Policy-/Root-Fingerprints und Post-COMMIT-Schutz
 - Laufzeitmessungen
 - reiner Regressionstest mit `selftest`
@@ -21,7 +21,7 @@ Das Tool löscht Dokumente nicht direkt und ruft `deleteExpiredItems()` nicht se
 
 ## 2. Datenbank-Unterstützung
 
-Normale Befehle laufen ausschließlich über das IBM-CM-SDK. Aus Sicht des Tools sind sie deshalb unabhängig davon, ob der Library Server DB2 oder Oracle verwendet:
+Die normalen Verwaltungsoperationen laufen über das IBM-CM-SDK und funktionieren sowohl gegen DB2- als auch Oracle-basierte Library Server:
 
 ```text
 status / doctor
@@ -38,6 +38,43 @@ Der direkte `--backfill` unterstützt ab 0.4.0:
 |---|---:|---:|
 | DB2 | ja | ja |
 | Oracle 19c | ja | ja |
+
+### 2.1 Wichtiger Unterschied beim AUTO_DELETE-Schedule
+
+IBM Content Manager erwartet abhängig von der Library-Server-Datenbank unterschiedliche Schedule-Syntax:
+
+```text
+DB2     -> UNIX cron
+Oracle  -> Oracle calendaring syntax
+```
+
+Beispiele für täglich 02:00:
+
+DB2:
+
+```text
+0 2 * * *
+```
+
+Oracle:
+
+```text
+FREQ=DAILY;BYHOUR=2;BYMINUTE=0;BYSECOND=0;
+```
+
+Deshalb werden getrennte fertige Profile mitgeliefert:
+
+```text
+profiles/auto-delete-1y.properties
+profiles/auto-delete-5y.properties
+profiles/auto-delete-10y.properties
+
+profiles/auto-delete-1y-oracle.properties
+profiles/auto-delete-5y-oracle.properties
+profiles/auto-delete-10y-oracle.properties
+```
+
+Die Policy-Semantik ist gleich; nur der Schedule-String unterscheidet sich. Die nicht mit `-oracle` gekennzeichneten Vorlagen und `ret-policy.properties` bleiben aus Kompatibilitätsgründen DB2-orientiert.
 
 ## 3. Version und Self-Test
 
@@ -56,12 +93,6 @@ Self-test: OK (... checks)
 Der Self-Test meldet sich nicht an Content Manager an und öffnet keine direkte DB2-/Oracle-Verbindung. Geprüft werden unter anderem Parser, Template-Erkennung, Fingerprints, `CREATETS`, DB2-/Oracle-SQL-Dialekte und Sekunden-Einheiten.
 
 ## 4. Policy-Vorlagen
-
-Standardvorlage:
-
-```text
-ret-policy.properties
-```
 
 Vollständiges unterstütztes Modell:
 
@@ -82,28 +113,51 @@ auto-delete.max-duration=120
 auto-delete.force-checkin=true
 ```
 
-`auto-delete.max-duration=120` bedeutet **120 Sekunden**. `auto-delete.force-checkin=true` entspricht **Einchecken vor Löschen erzwingen**.
+`auto-delete.max-duration` wird in **Sekunden** angegeben. `120` = 120 Sekunden = 2 Minuten.
 
-Empfohlene Verwendung:
+`auto-delete.force-checkin=true` bedeutet **Einchecken vor Löschen erzwingen**.
+
+### 4.1 DB2-Policy erstellen
 
 ```bash
 bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
 bin/cm-retention create profiles/auto-delete-5y.properties
 ```
 
-Mitgeliefert:
+### 4.2 Oracle-Policy erstellen
 
-```text
-profiles/auto-delete-1y.properties
-profiles/auto-delete-5y.properties
-profiles/auto-delete-10y.properties
+```bash
+bin/cm-retention create profiles/auto-delete-5y-oracle.properties --dry-run
+bin/cm-retention create profiles/auto-delete-5y-oracle.properties
+```
+
+Oracle-Vorlage:
+
+```properties
+auto-delete.schedule=FREQ=DAILY;BYHOUR=2;BYMINUTE=0;BYSECOND=0;
+```
+
+Ein `--schedule`-CLI-Override gewinnt weiterhin gegen die Properties. Der Administrator muss dabei die Syntax der Ziel-Datenbank verwenden.
+
+### 4.3 Template-Erkennung und Priorität
+
+Eine lesbare `.properties`-Datei wird automatisch erkannt, wenn sie das einzige Positionsargument von `create` ist:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
+```
+
+Explizit bleibt möglich:
+
+```bash
+bin/cm-retention create --properties profiles/auto-delete-5y.properties
 ```
 
 Priorität:
 
 ```text
 CLI POLICY / AGE / Optionen
-  > ausgewählte Properties-Datei
+  > ausgewählte Properties-Vorlage
   > ret-policy.properties
   > eingebaute Defaults
 ```
@@ -132,7 +186,7 @@ Bei keiner Verwendung:
 Assigned itemtypes:         0
 ```
 
-Die maximale Auto-Delete-Laufzeit wird mit Einheit ausgegeben:
+Die maximale AUTO_DELETE-Laufzeit wird eindeutig in Sekunden ausgegeben:
 
 ```text
 Auto-delete max. duration:  120 sec
@@ -147,7 +201,7 @@ bin/cm-retention unassign AM --dry-run
 bin/cm-retention unassign AM
 ```
 
-Ohne `--backfill` werden bestehende Retention-/Expiration-Metadaten nicht rückwirkend verändert.
+Ohne `--backfill` werden bestehende Dokument-Metadaten nicht verändert. Writes behalten stale-state- und reconnect/persisted-state-Verifikation.
 
 ## 7. Existing-Item-Backfill
 
@@ -157,38 +211,31 @@ Immer zuerst:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 ```
 
-IBM dokumentiert, dass das Anwenden einer systemgesteuerten Retention Policy auf einen vorhandenen ItemType nur neue Items/neue Versionen betrifft. Bestehende Items müssen per SQL oder eigener API-Prozedur mit Retention-/Expiration-Metadaten versehen werden.
-
 Die logische Operation lautet:
 
 ```sql
 UPDATE <SCHEMA>.<ROOT_TABLE>
-SET ICM$AUTODELETEDATE = CREATETS + <POLICY_EXPIRATION>
+SET ICM$AUTODELETEDATE = CREATETS + <Policy-Frist>
 WHERE ICM$RETENTIONDATE IS NULL
   AND ICM$AUTODELETEDATE IS NULL
   AND CREATETS IS NOT NULL;
 ```
 
-Wichtig: die physische Erstellungszeit-Spalte heißt `CREATETS`, nicht `ICM$CREATETS`.
+Wichtig: die physische Spalte heißt `CREATETS`, nicht `ICM$CREATETS`.
 
-### 7.1 DB2
+### 7.1 DB2-Dialekt
 
-Beispiel für ein Jahr:
+Beispiel ein Jahr:
 
 ```text
 ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 ```
 
-Zeitberechnung/Preflight verwenden DB2-Syntax wie:
+Für die Plan-Berechnung wird `CURRENT TIMESTAMP` verwendet. Der fail-fast Probe nutzt `FETCH FIRST 1 ROW ONLY`.
 
-```text
-CURRENT TIMESTAMP
-FETCH FIRST 1 ROW ONLY
-```
+### 7.2 Oracle-Dialekt
 
-### 7.2 Oracle
-
-Beispiel für ein Jahr:
+Beispiel ein Jahr:
 
 ```text
 ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
@@ -203,13 +250,11 @@ WEEK  -> NUMTODSINTERVAL(N*7, 'DAY')
 DAY   -> NUMTODSINTERVAL(N, 'DAY')
 ```
 
-Oracle verwendet `CURRENT_TIMESTAMP`; die kurze Exists-Abfrage verwendet `ROWNUM = 1`.
+Für die Plan-Berechnung wird `CURRENT_TIMESTAMP` verwendet. Der fail-fast Probe nutzt `ROWNUM = 1`.
 
-Es werden keine SQL-Fragmente aus CLI-Eingaben übernommen. Amount/Unit stammen aus der bereits validierten IBM-CM-Policy.
+### 7.3 Unterstützte Policy-Semantik
 
-### 7.3 Erlaubtes Policy-Modell
-
-Backfill akzeptiert nur:
+`--backfill` akzeptiert nur:
 
 ```text
 Retention type     FIXED_TIME
@@ -217,40 +262,35 @@ Retention enabled  false
 Expiration enabled true
 Expiration action  AUTO_DELETE
 Expiration period  > 0
-Unit               YEAR/MONTH/WEEK/DAY
+Unit               YEAR / MONTH / WEEK / DAY
 ```
 
-Andere Fälle werden vor dem Write abgelehnt.
+### 7.4 Detailed plan
 
-### 7.4 Root-Auflösung
-
-Der Anwender gibt keine `ICMUT...`-Tabelle an. Das Tool ermittelt Root-Komponente und Segment aus:
+Phase 1/Dry-run berechnet die Plan-Zähler in einem aggregierten SELECT pro Root-Tabelle:
 
 ```text
-ICMSTCOMPDEFS
-ICMSTITEMTYPEDEFS
+Root rows total
+Missing both dates
+Backfillable rows
+NULL create timestamp
+Immediately expired after
+Already auto-delete dated
+Retention date already set
 ```
 
-und leitet daraus die physische Tabelle ab:
+`Immediately expired after` ist sicherheitskritisch: diese Objekte erhalten ein Auto-Delete-Datum in der Vergangenheit und können nach Policy-Zuweisung unmittelbar für AUTO_DELETE eligible werden.
 
-```text
-ICMUT<COMPONENTTYPEID><SEGMENTID>
-```
+### 7.5 Phase-2 Fast Path
 
-Schema und Tabellenname werden strikt validiert. Multi-Segment-Fälle bleiben fail-closed.
+Vor dem Write wird der vollständige Statistik-Scan nicht wiederholt. Stattdessen werden frisch geprüft:
 
-### 7.5 Detailed Plan und Fast Path
-
-Phase 1/Dry-run berechnet die Berichtszähler in **einem aggregierten SELECT** pro Root-Tabelle.
-
-Phase 2 wiederholt diesen vollständigen Scan nicht. Vor dem Write werden frisch geprüft:
-
-- aktuelle ItemType-Zuweisung
+- ItemType-Zuweisung
 - vollständiger Policy-Fingerprint
-- ItemTypeID / ComponentTypeID / SegmentID / Root-Tabelle
-- Existenz eines eligible Rows mit `NULL CREATETS`
+- ItemTypeID / ComponentTypeID / SegmentID / ICMUT-Tabelle
+- Existenz eines problematischen eligible Rows mit `NULL CREATETS`
 
-### 7.6 Policy-/Root-Fingerprints
+### 7.6 Policy- und Root-Fingerprint
 
 Policy-Fingerprint:
 
@@ -337,9 +377,9 @@ BACKFILL_SCHEMA=ICMADMIN
 BACKFILL_JDBC_JAR=/u01/app/oracle/product/19.0.0/dbhome_1/jdbc/lib/ojdbc8.jar
 ```
 
-IBM CM 8.7 benötigt für Oracle `ojdbc8.jar`. Der Launcher sucht den Treiber unter anderem unter `$ORACLE_HOME/jdbc/lib` und in bekannten IBM/WAS-Pfaden. Ein explizites `BACKFILL_JDBC_JAR` ist für Produktion am eindeutigsten.
-
 Für Oracle ist ein expliziter JDBC-URL erforderlich. Listener/Service werden **nicht** aus `CM_DATABASE` geraten.
+
+Der Launcher sucht `ojdbc8.jar` unter anderem unter `$ORACLE_HOME/jdbc/lib` und in bekannten IBM/WAS-Pfaden. Ein explizites `BACKFILL_JDBC_JAR` ist für Produktion am eindeutigsten.
 
 Auch folgende Oracle-Aliase werden akzeptiert:
 
@@ -351,7 +391,7 @@ ORACLE_SCHEMA
 ORACLE_JDBC_JAR
 ```
 
-Bevorzugt werden jedoch die neutralen `BACKFILL_*`-Namen.
+Bevorzugt werden die neutralen `BACKFILL_*`-Namen.
 
 ### 8.3 Auto-Detection
 
@@ -426,9 +466,7 @@ build/cm-retention.jar
 build/cm-retention-0.4.0.jar
 build/.version
 build/ret-policy.properties
-build/profiles/auto-delete-1y.properties
-build/profiles/auto-delete-5y.properties
-build/profiles/auto-delete-10y.properties
+build/profiles/*.properties
 build/cm-retention-0.4.0-runtime.tar.gz
 build/SHA256SUMS-0.4.0
 ```
@@ -462,7 +500,20 @@ bin/cm-retention selftest
 bin/cm-retention doctor
 bin/cm-retention status
 bin/cm-retention policies
-bin/cm-retention policy AUTO_DELETE_1Y
+```
+
+Policy Create zuerst als Dry-run und mit dem passenden DB-Profil:
+
+DB2:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
+```
+
+Oracle:
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y-oracle.properties --dry-run
 ```
 
 Backfill immer zuerst read-only:
