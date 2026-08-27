@@ -20,7 +20,7 @@ final class Db2ChunkedBackfill {
 
     static boolean shouldUse(BackfillService backfill, BackfillWritePlan plan) {
         return "DB2".equals(backfill.databaseDisplayName())
-                && plan.plannedFillableRows > DEFAULT_CHUNK_ROWS;
+                && plan.plannedFillableRows > MIN_CHUNK_ROWS;
     }
 
     static BackfillResult apply(BackfillWritePlan plan) throws Exception {
@@ -35,7 +35,7 @@ final class Db2ChunkedBackfill {
         Connection db = DriverManager.getConnection(config.jdbcUrl, config.user, config.password);
         boolean originalAutoCommit = db.getAutoCommit();
         long totalUpdated = 0L;
-        int chunkRows = DEFAULT_CHUNK_ROWS;
+        int chunkRows = initialChunkRows(plan.plannedFillableRows);
         int chunkNumber = 0;
         try {
             if (originalAutoCommit) db.setAutoCommit(false);
@@ -44,7 +44,7 @@ final class Db2ChunkedBackfill {
             String baseUpdate = baseUpdateSql(table, plan.durationSql);
 
             System.out.println("  Write mode        : DB2 chunked COMMIT");
-            System.out.println("  Initial chunk     : " + DEFAULT_CHUNK_ROWS + " row(s)");
+            System.out.println("  Initial chunk     : " + chunkRows + " row(s)");
 
             while (true) {
                 long chunkStarted = Timing.start();
@@ -120,6 +120,13 @@ final class Db2ChunkedBackfill {
             } catch (Exception ignored) { }
             try { db.close(); } catch (Exception ignored) { }
         }
+    }
+
+    static int initialChunkRows(long plannedRows) {
+        if (plannedRows <= 0) return MIN_CHUNK_ROWS;
+        long bounded = Math.min((long) DEFAULT_CHUNK_ROWS,
+                Math.max((long) MIN_CHUNK_ROWS, plannedRows));
+        return (int) bounded;
     }
 
     static String buildChunkUpdateSql(String baseUpdate, int chunkRows) {
