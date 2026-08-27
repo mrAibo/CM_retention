@@ -64,7 +64,8 @@ mkdir -p "${BUILD_DIR}/classes"
     -d "${BUILD_DIR}/classes" \
     "${ROOT}/src/"*.java
 
-# Pure regression checks. They load SDK classes but do not connect to CM or DB2.
+# Pure regression checks. They load SDK classes but do not log in to CM and do
+# not open a direct DB2/Oracle JDBC connection.
 echo "Running self-test..."
 SELFTEST_CP="${BUILD_DIR}/classes:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*"
 LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
@@ -95,16 +96,32 @@ if [[ -f "${ROOT}/.env.example" ]]; then
 else
     echo "WARNING: ${ROOT}/.env.example is missing; generating ${BUILD_ENV_EXAMPLE}" >&2
     cat > "$BUILD_ENV_EXAMPLE" <<'ENVEXAMPLE'
-# IBM Content Manager connection alias from cmbicmsrvs.ini
+# IBM Content Manager connection
 CM_DATABASE=LSDB
 CM_USER=icmadmin
 CM_PASSWORD=CHANGE_ME
-
-# Local IBM CM and Java installations
 IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 
-# Optional DB2 settings used only by explicit --backfill operations.
+# Optional direct-database settings used only by explicit --backfill.
+# Preferred neutral names support both DB2 and Oracle.
+# BACKFILL_DB_TYPE=auto
+# BACKFILL_JDBC_URL=jdbc:db2:LSDB
+# BACKFILL_USER=icmadmin
+# BACKFILL_PASSWORD=CHANGE_ME
+# BACKFILL_SCHEMA=ICMADMIN
+# BACKFILL_JDBC_JAR=/opt/IBM/db2/V11.5/java/db2jcc4.jar
+
+# Oracle 19c example:
+# ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
+# BACKFILL_DB_TYPE=oracle
+# BACKFILL_JDBC_URL=jdbc:oracle:thin:@//dbhost.example:1521/LSDB
+# BACKFILL_USER=icmconct
+# BACKFILL_PASSWORD=CHANGE_ME
+# BACKFILL_SCHEMA=ICMADMIN
+# BACKFILL_JDBC_JAR=/u01/app/oracle/product/19.0.0/dbhome_1/jdbc/lib/ojdbc8.jar
+
+# Legacy DB2_* aliases remain accepted for existing installations.
 # DB2_DATABASE=LSDB
 # DB2_JDBC_URL=jdbc:db2:LSDB
 # DB2_USER=icmadmin
@@ -114,8 +131,8 @@ JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ENVEXAMPLE
 fi
 
-# Build a transportable runtime bundle. It intentionally contains no IBM SDK
-# or credentials; those are supplied by the target IBM CM installation.
+# Build a transportable runtime bundle. It intentionally contains no IBM SDK,
+# database JDBC driver, or credentials; those are supplied by the target CM host.
 RUNTIME_NAME="cm-retention-${APP_VERSION}"
 RUNTIME_STAGE="${BUILD_DIR}/runtime/${RUNTIME_NAME}"
 RUNTIME_TAR="${BUILD_DIR}/${RUNTIME_NAME}-runtime.tar.gz"
@@ -152,14 +169,18 @@ Installation:
        vi .env
   4. Review ret-policy.properties and profiles/*.properties.
      Default AUTO_DELETE force-checkin is true.
-  5. Verify the packaged version and pure self-test:
+  5. For --backfill, configure the matching direct database JDBC settings:
+       DB2    -> db2jcc4.jar
+       Oracle -> ojdbc8.jar (CM 8.7 / Oracle 19c)
+     Prefer BACKFILL_* settings; legacy DB2_* settings remain accepted.
+  6. Verify the packaged version and pure self-test:
        cat build/.version
        bin/cm-retention version
        bin/cm-retention selftest
-  6. Verify the target IBM CM environment:
+  7. Verify the target IBM CM environment:
        bin/cm-retention doctor
        bin/cm-retention status
-  7. Start with read-only commands or --dry-run before a real write.
+  8. Start with read-only commands or --dry-run before a real write.
 
 Create directly from a template, for example:
 
