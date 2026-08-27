@@ -2,7 +2,7 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.4.3**
+Current version: **0.4.4**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no direct document-delete command.
 
@@ -42,10 +42,12 @@ The expiration/retention semantics are identical; only the automatic-delete sche
 - create policies from reusable `.properties` templates
 - assign and unassign policies
 - process many ItemTypes with `--file` in one JVM
+- use a comma-separated ItemType list as a compact batch shortcut
 - preview writes with `--dry-run`
 - guarded existing-item `--backfill` before assignment
 - direct backfill against DB2 or Oracle
 - adaptive chunked COMMITs for large DB2 backfills
+- bounded catch-up for rows created concurrently during long DB2 backfills
 - Policy/Root fingerprints around database/CM transaction boundaries
 - verified-warning continuation for IBM CM secondary errors in batch mode
 - independent post-batch final verification in a second JVM/fresh CM session
@@ -80,10 +82,14 @@ cm-retention assign ITEMTYPE POLICY
 cm-retention unassign ITEMTYPE
 cm-retention delete POLICY
 
+cm-retention assign ITEM1,ITEM2,ITEM3 POLICY
+cm-retention unassign ITEM1,ITEM2,ITEM3
+
 cm-retention assign --file ITEMTYPES.txt POLICY
 cm-retention unassign --file ITEMTYPES.txt
 
 cm-retention assign ITEMTYPE POLICY --backfill
+cm-retention assign ITEM1,ITEM2,ITEM3 POLICY --backfill
 cm-retention assign --file ITEMTYPES.txt POLICY --backfill
 ```
 
@@ -216,16 +222,16 @@ Build on a compatible CM 8.7 host:
 
 The build compiles all Java sources and runs `SelfTestMain` before creating artifacts. The self-test loads IBM CM SDK classes but does **not** log in to Content Manager and does **not** open a DB2/Oracle JDBC connection.
 
-Version 0.4.3 produces:
+Version 0.4.4 produces:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.4.3.jar
+build/cm-retention-0.4.4.jar
 build/.version
 build/ret-policy.properties
 build/profiles/*.properties
-build/cm-retention-0.4.3-runtime.tar.gz
-build/SHA256SUMS-0.4.3
+build/cm-retention-0.4.4-runtime.tar.gz
+build/SHA256SUMS-0.4.4
 ```
 
 Verify:
@@ -240,8 +246,8 @@ bin/cm-retention doctor
 Expected version:
 
 ```text
-0.4.3
-cm-retention 0.4.3
+0.4.4
+cm-retention 0.4.4
 ```
 
 The runtime bundle contains no IBM SDK, JDBC driver, or credentials.
@@ -261,7 +267,7 @@ Normal assignment does not retroactively populate expiration metadata for existi
 
 # Existing-item backfill
 
-IBM documents that applying a system-controlled retention policy to an existing ItemType does not retroactively populate the policy metadata for existing items. `--backfill` is the explicit opt-in for this migration.
+IBM documents that applying a system-controlled retention policy to an existing ItemType does not retroactively populate retention/expiration metadata for existing items. `--backfill` is the explicit opt-in for this migration.
 
 Always start read-only:
 
@@ -303,11 +309,13 @@ ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 
 DB2 uses `CURRENT TIMESTAMP` for the immediate-expiration plan calculation and `FETCH FIRST 1 ROW ONLY` for the fail-fast probe.
 
-### Large DB2 backfills in 0.4.3
+### Large DB2 backfills (0.4.3+)
 
 Large DB2 backfills are split into bounded UPDATE/COMMIT chunks instead of one very large transaction. This avoids exhausting the active DB2 transaction log (`SQLCODE=-964`). The chunked path keeps the same NULL guards and therefore remains idempotent on retry.
 
 The initial chunk size is at most 250,000 rows. If DB2 reports `-964`, only the current uncommitted chunk is rolled back and retried with a smaller chunk size. ItemType assignment, Policy fingerprint and Root fingerprint are checked after every committed chunk; a mismatch stops with exit `6` and prevents policy assignment.
+
+Starting with 0.4.4, a short final chunk is no longer assumed to mean that the table is stable. Long-running backfills can overlap with normal document creation while the target policy is still unassigned. The chunker therefore recounts the remaining NULL rows and performs up to 20 bounded catch-up passes before assignment. Policy assignment starts only after the residual count reaches zero. If rows with `CREATETS=NULL` remain, or concurrent writes prevent a stable zero state within the bound, the workflow stays fail-closed with exit `6`.
 
 ## Oracle backfill SQL
 
@@ -358,6 +366,7 @@ It also:
 - fingerprints Policy and root metadata
 - revalidates before UPDATE, after database COMMIT, and during final verification
 - for chunked DB2 backfills, revalidates assignment/Policy/Root after each chunk COMMIT
+- catches up bounded concurrent rows before policy assignment
 - verifies residual NULL rows before policy assignment
 - returns exit `6` for persisted/partial-success conditions after a relevant COMMIT
 - keeps batch writes sequential
@@ -436,6 +445,16 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
+For short ad-hoc batches, 0.4.4 also accepts comma-separated exact ItemType names:
+
+```bash
+bin/cm-retention assign MNDPDM_DOC_05,ITEMTYPE2,ITEMTYPE3 AUTO_DELETE_1Y --backfill --yes
+bin/cm-retention assign ITEMTYPE1,ITEMTYPE2 AUTO_DELETE_1Y --yes
+bin/cm-retention unassign ITEMTYPE1,ITEMTYPE2 --yes
+```
+
+The comma form is normalized by the launcher into the same protected batch workflow as `--file`; it is not a separate mutation implementation. Therefore it receives the same Phase-1 validation, sequential/fail-fast writes, verified-warning handling, audit log, independent Phase-3 verifier and retry file. Empty or duplicate entries are rejected. When whitespace around commas is desired, quote the ItemType-list argument so the shell passes it as one argument.
+
 The complete mutation phase runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates every ItemType before the first mutation. Phase 2 remains sequential and non-atomic.
 
 ## Verified secondary IBM CM warnings in 0.4.1
@@ -470,7 +489,7 @@ For `--file --backfill`, continuation is allowed only when the secondary assignm
 
 ## Independent final verifier and audit log in 0.4.2
 
-Every `--file` invocation now gets its own audit log. By default it is written below:
+Every batch invocation (`--file` or comma-list shortcut) gets its own audit log. By default it is written below:
 
 ```text
 <application-home>/logs/
@@ -482,15 +501,15 @@ The location can be overridden in `.env`:
 CM_RETENTION_LOG_DIR=/var/log/cm-retention
 ```
 
-The log directory is restricted to the runtime user and each log records the version, timestamp, user/host, exact command, selected `.env` path, complete batch output, verifier output and final return-code summary. Credentials are not written to the log.
+The log directory is restricted to the runtime user and each log records the version, timestamp, user/host, exact command, selected `.env` path, complete batch output, verifier output and final return-code summary. For a comma-list shortcut, the original command and normalized batch command are both retained. Credentials are not written to the log.
 
-For a real write batch, after Phase 2 has started the launcher starts **a second Java process** (`BatchVerifyMain`). That process creates a new CM session and rereads every exact ItemType from the original file. It does not reuse the mutation JVM or its metadata/session cache.
+For a real write batch, after Phase 2 has started the launcher starts **a second Java process** (`BatchVerifyMain`). That process creates a new CM session and rereads every exact ItemType from the original batch input. It does not reuse the mutation JVM or its metadata/session cache.
 
 Expected state:
 
 ```text
-unassign --file ...          -> Retention policy must be empty
-assign --file ... POLICY     -> Retention policy must equal POLICY exactly
+unassign batch              -> Retention policy must be empty
+assign batch POLICY         -> Retention policy must equal POLICY exactly
 ```
 
 Example:
@@ -551,7 +570,7 @@ Batch mode (native Java runtime)
 | `5` | unsafe/conflicting operation refused before a relevant write |
 | `6` | verified IBM CM secondary warning, independent final-verifier mismatch/error, verification failure, or partial-success state after persistence may have occurred |
 
-A batch may therefore process its complete file and still return `6` when the requested final state was not independently clean or one or more verified IBM CM secondary warnings occurred. Scripts should inspect both the audit summary and the return code.
+A batch may therefore process its complete input and still return `6` when the requested final state was not independently clean or one or more verified IBM CM secondary warnings occurred. Scripts should inspect both the audit summary and the return code.
 
 ---
 
