@@ -23,6 +23,7 @@ Database-neutral existing-item backfill with Oracle support:
 - a missing direct-JDBC driver configuration is enforced for `--backfill`/`doctor` but no longer blocks ordinary CM-SDK commands
 - DB2 and Oracle JDBC driver class loading is selected dynamically; no Oracle classes are compile-time dependencies
 - all Policy/Root fingerprints, two-phase validation, post-COMMIT RC6 safety, residual-NULL verification, sequential batch semantics, and no-direct-delete guarantees remain unchanged
+- single-item and batch backfill dry-runs report the selected database before any write
 - added Oracle-specific 1y/5y/10y policy templates because IBM CM uses Oracle calendaring syntax for AUTO_DELETE schedules while DB2 uses cron syntax
 - pure self-test now covers DB2 and Oracle JDBC detection, interval SQL/precision, current-timestamp syntax, one-row probes, and generated UPDATE/plan SQL without opening a database connection
 - runtime `.env.example`, build fallback configuration, runtime installation text, README, operations guide, troubleshooting, and backfill documentation cover both DB2 and Oracle
