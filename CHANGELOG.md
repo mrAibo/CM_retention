@@ -2,6 +2,21 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.4.3
+
+Large-DB2-backfill and verifier-classification hardening after the first production run against multi-million-row ItemTypes:
+
+- DB2 `--backfill` automatically switches to bounded chunked UPDATE/COMMIT execution above 10,000 planned rows instead of one very large transaction
+- chunks start at up to 250,000 rows; if DB2 returns SQL0964C / SQLCODE `-964` (transaction log full), only the current transaction is rolled back and the chunk size is halved down to a 1,000-row floor before retrying
+- chunk SQL keeps the same NULL guards and uses the DB2 11.5 searched-UPDATE fetch clause, so already committed rows are excluded automatically on resume
+- each committed chunk reports progress and is followed by a fresh ItemType assignment / Policy fingerprint / Root fingerprint safety guard
+- any non-recoverable failure after one or more chunk COMMITs returns exit `6`, blocks policy assignment, and leaves the same backfill command safely resumable
+- small DB2 backfills retain the existing one-transaction path; Oracle behavior is unchanged
+- final batch verification now distinguishes the ItemType where a fail-fast batch actually stopped from later ItemTypes that were never attempted
+- verifier summaries classify `failed at stop`, `not attempted`, and any unexpected `post-write mismatch` separately instead of making every remaining ItemType look like an independent failure
+- large mismatch groups are capped in console output while the generated retry file still contains every confirmed ItemType that has not reached the requested state
+- bumped runtime/package version to `0.4.3`
+
 ## 0.4.2
 
 Independent batch-verification and audit hardening:
@@ -67,7 +82,7 @@ Database-neutral existing-item backfill with Oracle support:
 Safety and fast-path hardening after the native batch refactor:
 
 - added immutable Policy fingerprints covering retention/expiration semantics, schedule, delete limits and force-checkin
-- added immutable Root fingerprints covering ItemTypeID, ComponentTypeID, SegmentID and generated ICMUT root table
+- added immutable Root fingerprints covering ItemTypeID, ComponentTypeID, SegmentID and generated root table
 - backfill now revalidates Policy/Root/ItemType state before DB2 UPDATE, after DB2 COMMIT before policy assignment, and during final verification
 - a stale Policy/Root detected before the DB2 write is refused with exit code `5`
 - a stale Policy/Root detected after a committed changed-row backfill blocks policy assignment and surfaces exit code `6`
@@ -112,7 +127,7 @@ Automatic properties-template detection for policy creation:
 - explicit `--properties FILE` remains supported and is required when positional POLICY/AGE overrides are desired
 - classic `create POLICY AGE` behavior is unchanged
 - `create --help` now surfaces the shorthand syntax
-- corrected `auto-delete.max-duration` documentation and create-plan output: IBM CM interprets the value in seconds (`120` = 120 seconds), not minutes
+- corrected `auto-delete.max-duration` documentation and create-plan output: IBM CM interprets the value in seconds (`120` = 120 seconds), not 120 minutes
 - bumped runtime/package version to `0.3.3`
 
 ## 0.3.2
