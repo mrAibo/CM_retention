@@ -1,6 +1,6 @@
 # Existing-item backfill before policy assignment
 
-This document describes the explicit `--backfill` workflow in `cm-retention 0.4.0`.
+This document describes the explicit `--backfill` workflow in `cm-retention 0.4.1`.
 
 ## Purpose
 
@@ -28,7 +28,7 @@ The single-item and `--file` workflows share one guarded Java execution engine. 
 
 ## Supported databases
 
-`cm-retention 0.4.0` supports direct existing-item backfill against:
+Direct existing-item backfill supports:
 
 - IBM Db2
 - Oracle 19c as supported by IBM Content Manager 8.7
@@ -258,6 +258,7 @@ If the mismatch occurs before the database write, the command returns exit `5`. 
 11. Multi-segment cases fail closed.
 12. Writes remain sequential; no parallel direct-database UPDATEs are used.
 13. The tool never calls `deleteExpiredItems()` and never directly deletes documents.
+14. A verified IBM CM secondary assignment warning is surfaced only after the stronger final Policy/Root/assignment/database verification succeeds.
 
 ## Transaction boundary
 
@@ -276,6 +277,10 @@ detailed plan + fingerprints
 ```
 
 The direct database transaction and IBM CM API assignment are not one distributed transaction. A failure after database COMMIT can therefore leave backfilled rows without a completed policy assignment. This is deliberately exposed with exit `6`.
+
+If `CmService` raises an `OperationWarning` after the assignment because IBM CM reported a secondary error, `BackfillWorkflow` does **not** immediately classify that as a successful backfill. It completes the final fresh-session Policy fingerprint, Root fingerprint, assignment and residual-NULL verification first. Only if all of those checks succeed is the original warning rethrown as a **verified warning**. Single-item mode still returns RC `6`; batch mode may then continue with the next ItemType while preserving an overall RC `6`.
+
+Any other assignment or final-verification problem remains fail-closed and stops the batch.
 
 ## Configuration
 
@@ -331,7 +336,7 @@ Real execution output explicitly identifies the selected database:
 
 ```text
 Applying existing-item backfill
-  Database         : Oracle
+  Database         : DB2
   Item type        : AM
   ...
 ```
@@ -343,7 +348,19 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService` reuses one JDBC connection across the batch. Phase 1 validates every ItemType before the first mutation; Phase 2 remains sequential, fail-fast, and non-atomic.
+The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService` reuses one JDBC connection across the batch. Phase 1 validates every ItemType before the first mutation.
+
+Phase 2 remains sequential and non-atomic. True runtime, stale-state or verification failures are fail-fast. Beginning with 0.4.1, a **verified** IBM CM secondary warning does not stop later ItemTypes; it is counted in the final summary and makes the overall batch return RC `6`.
+
+Example:
+
+```text
+Batch complete: 217/217 item types reached a verified final state.
+Clean success     : 180
+Verified warnings : 37
+Warning itemtypes : AM, ...
+Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.
+```
 
 ## Self-test
 
@@ -359,6 +376,7 @@ The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService`
 - Oracle `ROWNUM = 1`
 - `CREATETS` rather than the incorrect `ICM$CREATETS`
 - UPDATE NULL guards
+- compact verified-warning batch summary formatting
 
 Manual test:
 
@@ -375,6 +393,6 @@ bin/cm-retention selftest
 5. Review root table, generated formula, eligible count, immediately-expired count, and selected database.
 6. Ensure database backup/change controls are in place.
 7. Run the real command.
-8. Inspect the return code; treat `6` as a possible persisted/partial-success condition.
+8. Inspect the return code. RC `6` may mean either a verified IBM CM secondary warning or another persisted/partial-success condition; use the printed summary/details to distinguish them.
 9. Re-run dry-run/status checks and inspect ItemType/policy state.
 10. Review IBM CM and DB2/Oracle logs if any warning/error occurred.
