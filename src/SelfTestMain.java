@@ -169,6 +169,10 @@ public final class SelfTestMain {
                 "large DB2 backfill starts at bounded chunk size");
         assertTrue(Db2ChunkedBackfill.initialChunkRows(50000L) == 50000,
                 "medium DB2 backfill starts at planned size");
+        assertTrue(Db2ChunkedBackfill.catchupChunkRows(34L, 250000) == 1000,
+                "small concurrent DB2 remainder uses minimum bounded catch-up chunk");
+        assertTrue(Db2ChunkedBackfill.catchupChunkRows(82573L, 250000) == 82573,
+                "larger concurrent DB2 remainder sizes catch-up to remaining rows");
         assertTrue(Db2ChunkedBackfill.isTransactionLogFull(
                 new SQLException("transaction log full", "57011", -964)),
                 "SQL0964C recognized for adaptive retry");
