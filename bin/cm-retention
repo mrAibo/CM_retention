@@ -60,9 +60,11 @@ DOCTOR_MODE=0
 
 HAS_FILE=0
 HAS_BACKFILL=0
+HAS_DRY_RUN=0
 for arg in "$@"; do
     [[ "$arg" == --file ]] && HAS_FILE=1
     [[ "$arg" == --backfill ]] && HAS_BACKFILL=1
+    [[ "$arg" == --dry-run ]] && HAS_DRY_RUN=1
 done
 
 NEEDS_CONFIG=1
@@ -89,8 +91,10 @@ fi
 : "${IBMCMROOT:=$(read_env_value IBMCMROOT "$ENV_FILE")}" 
 : "${JAVA_HOME:=$(read_env_value JAVA_HOME "$ENV_FILE")}" 
 : "${ORACLE_HOME:=$(read_env_value ORACLE_HOME "$ENV_FILE")}" 
+: "${CM_RETENTION_LOG_DIR:=$(read_env_value CM_RETENTION_LOG_DIR "$ENV_FILE")}" 
 IBMCMROOT=${IBMCMROOT:-/opt/IBM/db2cmv8}
 JAVA_HOME=${JAVA_HOME:-/opt/IBM/WebSphere/AppServer/java/8.0}
+CM_RETENTION_LOG_DIR=${CM_RETENTION_LOG_DIR:-${APP_HOME}/logs}
 
 JAVA=${JAVA_HOME}/bin/java
 [[ -x "$JAVA" ]] || preflight_fail "Java executable" "Java runtime not executable: $JAVA"
@@ -138,7 +142,7 @@ if [[ $DOCTOR_MODE == 1 ]]; then
     echo "Java / IBM CM checks"
 fi
 
-export IBMCMROOT JAVA_HOME
+export IBMCMROOT JAVA_HOME CM_RETENTION_LOG_DIR
 if [[ -n "${ORACLE_HOME:-}" ]]; then
     export ORACLE_HOME
 fi
@@ -211,6 +215,95 @@ run_batch() {
     "$JAVA" -cp "$CLASSPATH" BatchMain "$@"
 }
 
+run_batch_with_audit() {
+    local timestamp log_file retry_file batch_rc verify_rc final_rc
+    timestamp=$(date '+%Y%m%d-%H%M%S')
+
+    if ! mkdir -p "$CM_RETENTION_LOG_DIR"; then
+        echo "ERROR: unable to create batch log directory: $CM_RETENTION_LOG_DIR" >&2
+        return 2
+    fi
+    chmod 700 "$CM_RETENTION_LOG_DIR" 2>/dev/null || true
+
+    log_file="${CM_RETENTION_LOG_DIR}/cm-retention-batch-${timestamp}-$$-${1}.log"
+    retry_file="${CM_RETENTION_LOG_DIR}/cm-retention-batch-${timestamp}-$$-${1}-retry.txt"
+    if ! (umask 077; : > "$log_file"); then
+        echo "ERROR: unable to create batch audit log: $log_file" >&2
+        return 2
+    fi
+
+    {
+        echo "cm-retention batch audit"
+        echo "version=$BUILT_VERSION"
+        echo "started=$(date '+%Y-%m-%dT%H:%M:%S%z')"
+        echo "user=$(id -un 2>/dev/null || echo unknown)"
+        echo "host=$(hostname 2>/dev/null || echo unknown)"
+        printf 'command='
+        printf ' %q' "$@"
+        printf '\n'
+        echo "source_env=$ENV_FILE"
+        echo "--- batch output ---"
+    } >> "$log_file"
+
+    echo "Audit log: $log_file"
+
+    set +e
+    "$JAVA" -cp "$CLASSPATH" BatchMain "$@" \
+        > >(tee -a "$log_file") \
+        2> >(tee -a "$log_file" >&2)
+    batch_rc=$?
+    wait
+    set -e
+
+    verify_rc=0
+    if [[ $HAS_DRY_RUN -eq 0 ]] && grep -Fq "Phase 2/2: applying changes" "$log_file"; then
+        {
+            echo
+            echo "--- independent final verifier ---"
+        } >> "$log_file"
+        echo
+        echo "Starting independent final verification..."
+
+        set +e
+        CM_RETENTION_RETRY_FILE="$retry_file" \
+            "$JAVA" -cp "$CLASSPATH" BatchVerifyMain "$@" \
+            > >(tee -a "$log_file") \
+            2> >(tee -a "$log_file" >&2)
+        verify_rc=$?
+        wait
+        set -e
+    else
+        echo "Final verification: skipped (dry-run, validation-only, or cancelled before write phase)." \
+            | tee -a "$log_file"
+    fi
+
+    final_rc=$batch_rc
+    if [[ $batch_rc -eq 0 && $verify_rc -ne 0 ]]; then
+        # A write batch that appeared successful but cannot be independently
+        # verified is a persisted/verification condition, not a clean success.
+        final_rc=6
+    elif [[ $batch_rc -eq 6 ]]; then
+        final_rc=6
+    fi
+
+    {
+        echo
+        echo "--- audit summary ---"
+        echo "batch_rc=$batch_rc"
+        echo "verifier_rc=$verify_rc"
+        echo "final_rc=$final_rc"
+        echo "finished=$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    } >> "$log_file"
+
+    echo "Audit log: $log_file"
+    if [[ -f "$retry_file" ]]; then
+        chmod 600 "$retry_file" 2>/dev/null || true
+        echo "Retry file: $retry_file"
+    fi
+
+    return "$final_rc"
+}
+
 run_single_backfill() {
     "$JAVA" -cp "$CLASSPATH" SingleBackfillMain "$@"
 }
@@ -218,8 +311,11 @@ run_single_backfill() {
 if [[ $HAS_FILE -eq 1 ]]; then
     case ${1:-} in
         assign|unassign)
-            run_batch "$@"
-            exit $?
+            set +e
+            run_batch_with_audit "$@"
+            rc=$?
+            set -e
+            exit "$rc"
             ;;
         *)
             echo "ERROR: --file is supported only for assign and unassign" >&2
