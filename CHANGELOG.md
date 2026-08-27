@@ -2,6 +2,22 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.3.4
+
+Native single-JVM batch performance update:
+
+- `assign --file` and `unassign --file` now run through one native Java batch runtime instead of starting one JVM per ItemType
+- Phase 1 still validates every ItemType before the first mutation
+- Phase 2 remains sequential, fail-fast and deliberately non-atomic; no concurrent writes were introduced
+- the target policy is resolved once during Phase 1 instead of once per ItemType process
+- the CM session used for validation is discarded before Phase 2, while the existing reconnect/persisted-state verification after every CM write remains intact
+- `--backfill --file` reuses one DB2 JDBC connection across the batch instead of reconnecting for every plan/apply/verify step
+- backfill plan statistics are now calculated with one aggregate SELECT instead of seven independent COUNT queries per root table
+- final backfill verification no longer rebuilds the complete statistics plan and performs only the required assignment/root/NULL verification
+- stale-plan protection now also detects changes to the ItemType assignment and critical backfill semantics between Phase 1 and the actual write
+- no parallel DB2 UPDATE or IBM CM write execution is enabled; bounded parallel planning can be considered separately after production measurements
+- bumped runtime/package version to `0.3.4`
+
 ## 0.3.3
 
 Automatic properties-template detection for policy creation:
