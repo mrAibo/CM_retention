@@ -34,7 +34,7 @@ public final class BatchMain {
                 backfill = new BackfillService(BackfillConfig.from(base));
             }
 
-            printHeader(options, itemTypes.size());
+            printHeader(options, itemTypes.size(), backfill);
             long phase1Started = Timing.start();
             List<BatchEntry> entries = validateAll(cm, backfill, options, itemTypes);
             long phase1Nanos = Timing.elapsed(phase1Started);
@@ -51,7 +51,7 @@ public final class BatchMain {
             System.out.println("NOTE: batch execution is sequential, not atomic.");
             System.out.println("If a runtime error occurs, processing stops immediately, but earlier successful changes remain committed.");
             if (options.backfill) {
-                System.out.println("Each ItemType is processed as: guarded DB2 backfill -> policy fingerprint guard -> assignment -> final verify.");
+                System.out.println("Each ItemType is processed as: guarded database backfill -> policy fingerprint guard -> assignment -> final verify.");
             }
 
             if (!approve(options, entries.size())) {
@@ -61,8 +61,8 @@ public final class BatchMain {
             }
 
             // Discard CM metadata cached during the potentially long validation
-            // phase. The DB2 BackfillService remains open and reuses its one
-            // connection across both phases.
+            // phase. The direct-database BackfillService remains open and reuses
+            // its one JDBC connection across both phases.
             cm.closeQuietly();
 
             System.out.println();
@@ -224,7 +224,9 @@ public final class BatchMain {
         return "y".equalsIgnoreCase(value) || "yes".equalsIgnoreCase(value);
     }
 
-    private static void printHeader(BatchOptions options, int count) {
+    private static void printHeader(BatchOptions options,
+                                    int count,
+                                    BackfillService backfill) {
         System.out.println("Batch mode (native Java runtime)");
         System.out.println("  Operation : " + options.command.cliName);
         System.out.println("  File      : " + options.file);
@@ -232,6 +234,9 @@ public final class BatchMain {
         if (options.command == BatchCommand.ASSIGN) {
             System.out.println("  Policy    : " + options.policyName);
             System.out.println("  Backfill  : " + (options.backfill ? "yes" : "no"));
+            if (backfill != null) {
+                System.out.println("  Database  : " + backfill.databaseDisplayName());
+            }
         }
         System.out.println("  Runtime   : single JVM");
         System.out.println();
