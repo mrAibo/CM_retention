@@ -1,28 +1,17 @@
 # Troubleshooting
 
-Diese Datei sammelt bekannte Betriebs- und IBM-CM-Fehlerbilder, die beim Einsatz von `cm-retention` auftreten können.
+Diese Datei sammelt bekannte Betriebs- und IBM-CM-Fehlerbilder für `cm-retention 0.4.0`.
 
 ## 1. `.env` wird abgelehnt
-
-### Fehler
 
 ```text
 ERROR: insecure permissions on .../.env: 644
 ```
 
-### Ursache
-
-Der Wrapper akzeptiert keine Konfigurationsdatei, die für Gruppe oder andere Benutzer zugänglich ist.
-
-### Lösung
+Lösung:
 
 ```bash
 chmod 600 .env
-```
-
-Prüfen:
-
-```bash
 stat -c '%A %a %U:%G %n' .env
 ```
 
@@ -41,12 +30,12 @@ ls -l .env
 Oder explizit:
 
 ```bash
-bin/cm-retention --env /secure/cm-test.env connection test
+bin/cm-retention --env /secure/cm-test.env status
 ```
 
 ## 3. Falscher oder unbekannter CM-Alias
 
-Wenn `CM_DATABASE` nicht dem auf dem Host konfigurierten IBM-CM-Library-Server-Alias entspricht, schlägt bereits die Verbindung fehl.
+Wenn `CM_DATABASE` nicht dem auf dem Host konfigurierten IBM-CM-Library-Server-Alias entspricht, schlägt die CM-SDK-Verbindung fehl.
 
 Prüfen:
 
@@ -58,187 +47,185 @@ Prüfen:
 Beginnen mit:
 
 ```bash
-bin/cm-retention --env /secure/cm-test.env connection test
+bin/cm-retention --env /secure/cm-test.env status
+bin/cm-retention --env /secure/cm-test.env doctor
 ```
 
-## 4. Exit-Code 6 nach `itemtype assign` oder `unassign`
+## 4. `--backfill`: Datenbanktyp/URL widersprüchlich
 
-### Bedeutung
+Beispiel:
 
-`cm-retention` hat nach einer IBM-CM-Exception die Verbindung beendet, neu aufgebaut und den persistierten Itemtype-Zustand erneut gelesen.
+```text
+ERROR: BACKFILL_DB_TYPE=oracle conflicts with JDBC URL jdbc:db2:...
+```
 
-Exit-Code `6` wird nur verwendet, wenn der angeforderte Zustand **tatsächlich gespeichert wurde**, IBM CM danach aber einen weiteren Fehler gemeldet hat.
+`0.4.0` erkennt den direkten Backfill-Datenbanktyp am URL-Präfix:
 
-Nicht einfach wiederholen. Zuerst Zustand und Logs prüfen:
+```text
+jdbc:db2:...     -> DB2
+jdbc:oracle:...  -> Oracle
+```
+
+Entweder `BACKFILL_DB_TYPE=auto` verwenden/den Typ weglassen oder Typ und URL konsistent konfigurieren.
+
+## 5. `--backfill`: JDBC-Treiber fehlt
+
+Typisch:
+
+```text
+ERROR: DB2 JDBC driver not found ...
+```
+
+oder:
+
+```text
+ERROR: Oracle JDBC driver not found ...
+```
+
+Bevorzugt explizit konfigurieren:
+
+DB2:
+
+```dotenv
+BACKFILL_JDBC_JAR=/opt/IBM/db2/V11.5/java/db2jcc4.jar
+```
+
+Oracle:
+
+```dotenv
+ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
+BACKFILL_JDBC_JAR=/u01/app/oracle/product/19.0.0/dbhome_1/jdbc/lib/ojdbc8.jar
+```
+
+Prüfen:
 
 ```bash
-bin/cm-retention itemtype show ITEMTYPE
-bin/cm-retention policy usage POLICY_NAME
+ls -l "$BACKFILL_JDBC_JAR"
 ```
+
+Der Runtime-Tarball enthält absichtlich keinen DB2-/Oracle-JDBC-Treiber.
+
+## 6. Oracle: JDBC URL fehlt
+
+Oracle-Backfill benötigt einen expliziten URL. Beispiel:
+
+```dotenv
+BACKFILL_DB_TYPE=oracle
+BACKFILL_JDBC_URL=jdbc:oracle:thin:@//dbhost.example:1521/LSDB
+BACKFILL_USER=icmconct
+BACKFILL_PASSWORD=CHANGE_ME
+BACKFILL_SCHEMA=ICMADMIN
+```
+
+Das Tool leitet Listener/Port/Service bewusst nicht aus `CM_DATABASE` ab.
+
+## 7. Direkter DB-Fehler bei `--backfill`
+
+Die Ausgabe beginnt mit:
+
+```text
+DATABASE ERROR
+```
+
+und zeigt Message, SQLSTATE und Error Code.
+
+Prüfen:
+
+- zeigt Dry-run die erwartete Datenbank (`DB2` oder `Oracle`)?
+- korrekter JDBC URL?
+- korrektes Schema?
+- hat der direkte DB-Benutzer SELECT auf CM-Metadaten/Root-Tabellen?
+- hat er UPDATE auf die betroffene `ICMUT...`-Root-Tabelle?
+- DB2-/Oracle-Log für denselben Zeitpunkt prüfen.
+
+Immer zunächst:
+
+```bash
+bin/cm-retention assign ITEMTYPE POLICY --backfill --dry-run
+```
+
+## 8. Exit-Code 6 nach Assign/Unassign/Backfill
+
+Exit `6` bedeutet, dass Persistenz bereits erfolgt sein kann oder eine abschließende Verifikation nicht sauber abgeschlossen wurde.
+
+Nicht blind wiederholen. Zuerst aktuellen Zustand lesen:
+
+```bash
+bin/cm-retention itemtype ITEMTYPE
+bin/cm-retention policy POLICY
+```
+
+Bei Backfill zusätzlich denselben Dry-run erneut ausführen. Wenn der direkte DB-UPDATE bereits committed wurde, darf der zweite Lauf aufgrund der NULL-Guards die bereits gesetzten Auto-Delete-Daten nicht überschreiben.
 
 Mit Diagnose:
 
 ```bash
-CM_DEBUG=true bin/cm-retention itemtype show ITEMTYPE
+CM_DEBUG=true bin/cm-retention itemtype ITEMTYPE
 ```
 
-Bekannte Ursachen aus realen CM-8.7-Umgebungen sind insbesondere:
+## 9. `ICM7022`, Reason Code 13, `mkdir error`
 
-- fehlender Schreibzugriff für den DB2-Fenced-Prozess auf das Access-Module-Verzeichnis;
-- inkonsistente ältere Itemtype-/Component-View-Metadaten.
+Dieses Fehlerbild betrifft IBM-CM-/Library-Server-Umgebung und ist nicht durch den Backfill-SQL-Dialekt verursacht.
 
-## 5. `ICM7022`, Reason Code 13, `mkdir error`
+In einer real beobachteten **DB2-basierten** CM-8.7-Umgebung konnte der DB2-Fenced-Benutzer das Verzeichnis für neu zu erzeugende Access-Module nicht beschreiben.
 
-### Typisches Fehlerbild
-
-Im Library-Server-Log kann sinngemäß erscheinen:
-
-```text
-ICM7022
-reasonCode 13
-mkdir error
-```
-
-### Beobachtete Ursache
-
-Der DB2-Fenced-Benutzer konnte das Verzeichnis für neu zu erzeugende Access-Module nicht beschreiben.
-
-### Prüfung
-
-Zuerst den **tatsächlichen** Pfad und Fenced-Benutzer des jeweiligen Systems ermitteln. Nicht Testwerte blind auf Produktion übertragen.
-
-Beispiel für eine Pfadprüfung:
+DB2-Beispiel zur kontrollierten Prüfung:
 
 ```bash
 namei -l /path/to/cmgmt/ls/LSDB
 getfacl -p /path/to/cmgmt /path/to/cmgmt/ls /path/to/cmgmt/ls/LSDB
 ```
 
-Kontrollierter Schreibtest als root:
+Schreibtest nur mit dem tatsächlich für das System ermittelten Prozessbenutzer durchführen. Keine Testwerte blind nach PROD übernehmen und kein pauschales `chmod 777` setzen.
 
-```bash
-/usr/sbin/runuser -u db2fcm -- /bin/sh -c '
-  FILE=/path/to/cmgmt/ls/LSDB/.cm-permission-test-$$
-  : > "$FILE" &&
-  ls -l "$FILE" &&
-  rm -f "$FILE"
-'
-echo "RC=$?"
-```
+Für Oracle-basierte CM-Installationen den tatsächlich beteiligten OS-/CM-Prozess und dessen Pfade separat ermitteln; die DB2-Fenced-Annahme gilt dort nicht automatisch.
 
-Erwartet:
+## 10. `DGL0303A` / `getViewOperator() opCode [-1]`
 
-```text
-RC=0
-```
-
-### Reparatur
-
-Nur die für den realen Prozess benötigten Rechte setzen. Kein pauschales `chmod 777`.
-
-Eigentümer, Gruppe und ACL-Modell können zwischen Test und Produktion unterschiedlich sein.
-
-## 6. `DGL0303A` / `getViewOperator() opCode [-1]`
-
-### Typisches Fehlerbild
+Typisches Fehlerbild:
 
 ```text
 DGL0303A: Invalid parameter
 DKAttrDefICM::getViewOperator() opCode : [-1]
 ```
 
-### Beobachtete Ursache
+Bei älteren Component Views wurden in realen Umgebungen Einträge mit `VIEWOPERATOR=-1` beobachtet. Der CM-8.7-SDK kann beim Neuaufbau/Aktualisieren der ItemType-View darüber stolpern.
 
-Bei älteren Component Views wurden Einträge in `ICMSTCOMPVIEWATTRS` gefunden, deren `VIEWOPERATOR=-1` ist. Bei den untersuchten fehlerhaften Zeilen war gleichzeitig kein Attributfilter aktiv.
+Die vorhandenen SQL-Audit-/Repair-Beispiele in [METADATA_REPAIR.md](METADATA_REPAIR.md) wurden für **DB2** entwickelt und enthalten DB2-Syntax wie `WITH UR`. Sie sind **nicht** automatisch als Oracle-Reparaturanleitung zu verwenden.
 
-Der aktuelle CM-8.7-SDK kann beim Neuaufbau/Aktualisieren der Itemtype-View über diesen alten Metadatenzustand stolpern.
+Keine Massenänderung direkt per SQL durchführen.
 
-### Nur lesender Audit
-
-```sql
-SELECT
-    CV.ITEMTYPEID,
-    CV.COMPONENTVIEWID,
-    RTRIM(CV.COMPONENTVIEWNAME) AS VIEWNAME,
-    COUNT(*) AS INVALID_COUNT
-FROM ICMADMIN.ICMSTCOMPVIEWDEFS CV
-JOIN ICMADMIN.ICMSTCOMPVIEWATTRS VA
-  ON VA.COMPONENTVIEWID = CV.COMPONENTVIEWID
-WHERE VA.VIEWOPERATOR NOT IN (0, 1, 2, 3, 4, 13, 14)
-GROUP BY
-    CV.ITEMTYPEID,
-    CV.COMPONENTVIEWID,
-    CV.COMPONENTVIEWNAME
-ORDER BY
-    CV.ITEMTYPEID,
-    CV.COMPONENTVIEWID
-WITH UR;
-```
-
-Details:
-
-```sql
-SELECT
-    CV.ITEMTYPEID,
-    CV.COMPONENTVIEWID,
-    RTRIM(CV.COMPONENTVIEWNAME) AS VIEWNAME,
-    VA.ATTRIBUTEID,
-    VA.SEQUENCENUM,
-    VA.ATTRIBUTEFLAGS,
-    BITAND(VA.ATTRIBUTEFLAGS, 8) AS FILTERFLAG,
-    VA.VIEWOPERATOR,
-    VA.VIEWCOMPAREVALUE
-FROM ICMADMIN.ICMSTCOMPVIEWDEFS CV
-JOIN ICMADMIN.ICMSTCOMPVIEWATTRS VA
-  ON VA.COMPONENTVIEWID = CV.COMPONENTVIEWID
-WHERE VA.VIEWOPERATOR NOT IN (0, 1, 2, 3, 4, 13, 14)
-ORDER BY
-    CV.ITEMTYPEID,
-    CV.COMPONENTVIEWID,
-    VA.SEQUENCENUM
-WITH UR;
-```
-
-### Wichtig
-
-Ein Treffer mit aktivem Filter (`FILTERFLAG <> 0`) darf **nicht** blind auf Operator `0` gesetzt werden. Dann muss die tatsächliche Filterdefinition rekonstruiert werden.
-
-Keine Massenänderung direkt per SQL durchführen. Siehe [METADATA_REPAIR.md](METADATA_REPAIR.md).
-
-## 7. Policy kann nicht gelöscht werden
+## 11. Policy kann nicht gelöscht werden
 
 ```text
-ERROR: Policy is assigned to ... Unassign it first.
+ERROR: Policy is assigned to ... itemtype(s)
 ```
 
 Verwendung anzeigen:
 
 ```bash
-bin/cm-retention policy usage POLICY_NAME
+bin/cm-retention policy POLICY_NAME
 ```
 
-Jede Zuordnung gezielt entfernen:
+Zuweisung gezielt entfernen:
 
 ```bash
-bin/cm-retention itemtype unassign ITEMTYPE --yes
+bin/cm-retention unassign ITEMTYPE --dry-run
+bin/cm-retention unassign ITEMTYPE
 ```
 
-Danach löschen:
+Danach:
 
 ```bash
-bin/cm-retention policy delete POLICY_NAME --yes
+bin/cm-retention delete POLICY_NAME --dry-run
+bin/cm-retention delete POLICY_NAME
 ```
 
-## 8. Stacktrace einschalten
+## 12. Stacktrace einschalten
 
 ```bash
-CM_DEBUG=true bin/cm-retention connection test
-```
-
-oder:
-
-```bash
-CM_DEBUG=true bin/cm-retention itemtype assign ITEMTYPE POLICY --yes
+CM_DEBUG=true bin/cm-retention status
+CM_DEBUG=true bin/cm-retention assign ITEMTYPE POLICY --backfill --dry-run
 ```
 
 `CM_DEBUG=true` ist nur für Diagnose gedacht und kann umfangreiche technische Informationen ausgeben.
