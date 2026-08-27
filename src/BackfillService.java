@@ -37,6 +37,19 @@ final class BackfillService {
         return dialect.displayName();
     }
 
+    /** Package-private primitives used only by the DB2 bounded-chunk executor. */
+    Connection directConnection() throws Exception {
+        return connection();
+    }
+
+    String qualifiedTable(String tableName) {
+        return qualified(tableName);
+    }
+
+    void restoreConnectionState(Connection db, boolean originalAutoCommit) {
+        restoreAutoCommitOrReconnect(db, originalAutoCommit);
+    }
+
     /** Detailed, read-only plan used by dry-run/Phase 1. */
     BackfillPlan plan(DKItemTypeDefICM itemType,
                       DKRetentionPolicyDefICM policy,
@@ -346,7 +359,6 @@ final class BackfillService {
         if (policy.getExpirationTimePeriod() <= 0) {
             throw new CliException("--backfill requires a positive expiration period", 5);
         }
-        // Also validates that the selected database dialect supports this unit.
         durationSql(policy);
     }
 
@@ -393,7 +405,6 @@ final class BackfillService {
                 db.setAutoCommit(originalAutoCommit);
             }
         } catch (Exception ignored) {
-            // Do not keep a connection whose transaction state is uncertain.
             closeQuietly();
         }
     }
