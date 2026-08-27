@@ -241,6 +241,12 @@ Always start read-only:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 ```
 
+Single-item dry-run prints the selected direct database explicitly before the detailed plan, for example:
+
+```text
+Backfill database           : Oracle
+```
+
 Real execution:
 
 ```bash
