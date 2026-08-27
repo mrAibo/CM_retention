@@ -2,7 +2,7 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.3.3**
+Current version: **0.3.4**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no additional runtime dependencies beyond the existing IBM CM / DB2 runtime.
 
@@ -15,7 +15,7 @@ The project intentionally stays narrow: Java 8, the IBM CM SDK already installed
 - automatically recognize a readable `.properties` file after `create`
 - keep multiple policy templates under `profiles/`
 - assign and unassign policies
-- process multiple ItemTypes with `--file`
+- process multiple ItemTypes with `--file` in one native Java batch runtime
 - preview writes with `--dry-run`
 - optionally backfill existing objects before assignment with `--backfill`
 - load policy defaults from `ret-policy.properties`
@@ -356,18 +356,18 @@ Run on a compatible IBM CM 8.7 build host:
 
 The version is read from `src/CmRetention.java` and written into the JAR manifest and `build/.version`.
 
-For version 0.3.3 the build creates:
+For version 0.3.4 the build creates:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.3.3.jar
+build/cm-retention-0.3.4.jar
 build/.version
 build/ret-policy.properties
 build/profiles/auto-delete-1y.properties
 build/profiles/auto-delete-5y.properties
 build/profiles/auto-delete-10y.properties
-build/cm-retention-0.3.3-runtime.tar.gz
-build/SHA256SUMS-0.3.3
+build/cm-retention-0.3.4-runtime.tar.gz
+build/SHA256SUMS-0.3.4
 ```
 
 Verify:
@@ -382,8 +382,8 @@ bin/cm-retention version
 Expected:
 
 ```text
-0.3.3
-cm-retention 0.3.3
+0.3.4
+cm-retention 0.3.4
 ```
 
 ## Deployment without Git
@@ -397,7 +397,7 @@ On the build host:
 Copy:
 
 ```text
-build/cm-retention-0.3.3-runtime.tar.gz
+build/cm-retention-0.3.4-runtime.tar.gz
 ```
 
 to the target server.
@@ -406,8 +406,8 @@ On the target:
 
 ```bash
 cd /home/ibmcmadm
-tar -xzf cm-retention-0.3.3-runtime.tar.gz
-cd cm-retention-0.3.3
+tar -xzf cm-retention-0.3.4-runtime.tar.gz
+cd cm-retention-0.3.4
 
 cp .env.example .env
 chmod 600 .env
@@ -520,7 +520,26 @@ Real batch:
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-Before the first mutation, all ItemTypes are validated. Actual execution is sequential and deliberately non-atomic. If one ItemType fails in phase 2, processing stops and earlier successful changes remain committed.
+Since 0.3.4, the complete `--file` workflow runs inside **one JVM** instead of starting a new JVM for every ItemType.
+
+Phase 1:
+
+- opens/reuses one CM runtime for the complete validation pass
+- resolves the target policy once
+- validates every ItemType before the first write
+- with `--backfill`, reuses one DB2 JDBC connection for the batch
+- with `--backfill`, calculates all seven plan counters with one aggregate SELECT per root table instead of seven independent COUNT queries
+
+Before Phase 2, the CM validation session is deliberately discarded so writes do not rely on potentially stale metadata. Phase 2 remains **sequential and fail-fast**. After every CM write, the existing reconnect-based persisted-state verification remains enabled.
+
+No parallel UPDATE/write execution is performed in 0.3.4. This is intentional: multiple simultaneous large DB2 updates could increase transaction-log, I/O and lock pressure. If one ItemType fails in Phase 2, processing stops and earlier successful changes remain committed.
+
+The output identifies the optimized runtime explicitly:
+
+```text
+Batch mode (native Java runtime)
+  Runtime   : single JVM
+```
 
 ---
 
@@ -562,6 +581,19 @@ resolve
  -> mutate
  -> commit
  -> reconnect / verify persisted state
+```
+
+Batch mode adds:
+
+```text
+one JVM
+ -> validate ALL ItemTypes
+ -> one confirmation
+ -> discard validation CM session
+ -> sequential per-ItemType write
+ -> commit
+ -> reconnect/verify
+ -> next ItemType
 ```
 
 Backfill adds a guarded DB2 phase before assignment:
