@@ -1,5 +1,7 @@
 # IBM CM Component-View-Metadaten kontrolliert reparieren
 
+> **Datenbank-Hinweis:** Dieses Dokument basiert auf einem real beobachteten **DB2-basierten** IBM-CM-8.7-System. Die enthaltenen SQL-Beispiele verwenden DB2-Syntax wie `WITH UR` und sind **keine Oracle-Reparaturanleitung**. Die DB2-/Oracle-Unterstützung von `cm-retention --backfill` in Version 0.4.0 ändert daran nichts: Component-View-Metadatenreparatur ist ein separater, besonders vorsichtiger Diagnose-/Repair-Fall.
+
 Dieses Verfahren beschreibt einen **konservativen Reparaturweg** für ältere Itemtype-/Component-View-Definitionen, die beim Aktualisieren mit einem Fehler wie
 
 ```text
@@ -30,7 +32,7 @@ Deshalb:
 
 ## 2. Betroffene View identifizieren
 
-Read-only:
+Read-only, **DB2-Syntax**:
 
 ```sql
 SELECT
@@ -79,162 +81,75 @@ Vor jeder Änderung die betroffene View dokumentieren:
 
 Zusätzlich die relevanten Tabellenzeilen exportieren, beispielsweise:
 
-```bash
-db2 "EXPORT TO /secure/backup/view_attrs_<VIEWID>.ixf OF IXF
-SELECT *
-FROM ICMADMIN.ICMSTCOMPVIEWATTRS
-WHERE COMPONENTVIEWID = <VIEWID>
-WITH UR"
-```
-
-```bash
-db2 "EXPORT TO /secure/backup/view_defs_<VIEWID>.ixf OF IXF
+```sql
 SELECT *
 FROM ICMADMIN.ICMSTCOMPVIEWDEFS
-WHERE COMPONENTVIEWID = <VIEWID>
-WITH UR"
-```
+WHERE COMPONENTVIEWID = <ID>
+WITH UR;
 
-Diese Exporte sind zunächst Beweissicherung/Dokumentation. Nicht blind in CM-Systemtabellen zurückimportieren.
-
-## 4. Pilot nur auf TEST
-
-Einen einzelnen, bereits verstandenen betroffenen Itemtype als Pilot auswählen.
-
-Während der Reparatur möglichst keine parallelen administrativen Änderungen am Itemtype durchführen.
-
-## 5. Subset im IBM System Administration Client öffnen
-
-Sinngemäß:
-
-```text
-Data Modeling
-  → Item Types
-    → <ITEMTYPE>
-      → Item Type Subsets
-        → <BETROFFENES_SUBSET>
-```
-
-Vor dem Speichern nochmals vergleichen:
-
-- ACL
-- Attributliste
-- Reihenfolge
-- repräsentatives Attribut
-- Lese-/Schreibrechte
-- Filter
-
-## 6. Ungültige ungefilterte Attribute neu schreiben lassen
-
-Nur wenn vorher bestätigt wurde, dass die betroffenen Attribute **keinen Filter** besitzen:
-
-1. betroffenes Attribut aus dem Subset entfernen;
-2. dasselbe Attribut wieder hinzufügen;
-3. ursprüngliche Reihenfolge wiederherstellen;
-4. ursprüngliche Rechte wiederherstellen;
-5. repräsentatives Attribut korrekt markieren;
-6. keinen neuen Filter setzen;
-7. ACL unverändert lassen;
-8. Subset speichern.
-
-Ziel ist, dass IBM CM die Definition mit dem aktuellen Administration Client sauber neu erzeugt, statt eine interne Tabelle manuell zu patchen.
-
-## 7. Danach Datenbank prüfen
-
-Die View darf anschließend keine unbekannten Operatorwerte mehr enthalten:
-
-```sql
-SELECT
-    COMPONENTVIEWID,
-    ATTRIBUTEID,
-    SEQUENCENUM,
-    ATTRIBUTEFLAGS,
-    VIEWOPERATOR,
-    VIEWCOMPAREVALUE
+SELECT *
 FROM ICMADMIN.ICMSTCOMPVIEWATTRS
-WHERE COMPONENTVIEWID = <VIEWID>
-  AND VIEWOPERATOR NOT IN (0, 1, 2, 3, 4, 13, 14)
+WHERE COMPONENTVIEWID = <ID>
 ORDER BY SEQUENCENUM
 WITH UR;
 ```
 
-Erwartung:
+## 4. Nicht blind per SQL reparieren
+
+Der primäre Reparaturweg soll über unterstützte IBM-CM-Administrations-/SDK-Funktionen erfolgen, soweit dies für den konkreten View-Zustand möglich ist. Ein direktes SQL-UPDATE interner Definitionstabellen kann Folgeinkonsistenzen erzeugen.
+
+Wenn eine direkte Datenbankänderung nach IBM-Support-/Change-Freigabe trotzdem erforderlich ist, müssen mindestens:
+
+- exakte betroffene Zeilen gesichert sein,
+- die Semantik des Filters verstanden sein,
+- TEST und PROD separat verifiziert werden,
+- ein Rollback-Weg dokumentiert sein.
+
+## 5. `VIEWOPERATOR=-1` einordnen
+
+Ein beobachteter problematischer Zustand war:
 
 ```text
-0 rows
+VIEWOPERATOR = -1
+FILTERFLAG   = 0
 ```
 
-Danach die vollständige View gegen die Sicherung vergleichen. Nicht nur `VIEWOPERATOR`, sondern auch Reihenfolge, Flags, ACL und fachliche Filter prüfen.
+Das ist **nicht** gleichbedeutend mit der allgemeinen Regel „-1 auf 0 setzen“. Besonders bei aktivem Filter (`FILTERFLAG <> 0`) kann der korrekte Operator fachlich ein anderer sein.
 
-## 8. Access-Module und Logs kontrollieren
-
-Nach dem Speichern prüfen, ob IBM CM die View/Access-Module ohne Folgefehler aktualisiert hat.
-
-Insbesondere nach folgenden Mustern suchen:
+Deshalb:
 
 ```text
-DGL0303A
-getViewOperator
-ICM7022
-mkdir error
+FILTERFLAG = 0
+  -> möglicher Legacy-/Default-Metadatenfall, weiter untersuchen
+
+FILTERFLAG <> 0
+  -> Filtersemantik rekonstruieren; keine pauschale Korrektur
 ```
 
-Ein separates Filesystem-/Berechtigungsproblem muss vor weiteren Itemtype-Änderungen behoben sein.
+## 6. Nach jeder Reparatur verifizieren
 
-## 9. Fachlicher Test
+Mindestens:
 
-Der reparierte Subset muss weiterhin wie zuvor funktionieren:
+1. denselben Read-only Audit erneut ausführen;
+2. ItemType über IBM CM SDK lesen;
+3. betroffene View/Subset öffnen;
+4. Policy assign/unassign zunächst mit `--dry-run` prüfen;
+5. danach echten Assign/Unassign und Persistenzverifikation durchführen;
+6. ICMSERVER.log prüfen.
 
-- Suche
-- Dokument öffnen
-- sichtbare Attribute
-- editierbare/nicht editierbare Attribute
-- ACL-Zugriff
-- repräsentatives Attribut
-- eventuell vorhandene Filter
-
-## 10. Retention-Regressionstest
-
-Erst danach den ursprünglichen Admin-Pfad erneut testen:
+Beispiel:
 
 ```bash
-bin/cm-retention itemtype assign TEST_ITEMTYPE TEST_POLICY --yes
-echo "RC=$?"
+bin/cm-retention itemtype ITEMTYPE
+bin/cm-retention assign ITEMTYPE POLICY --dry-run
 ```
 
-Erwartung:
+## 7. Oracle-Systeme
 
-```text
-RC=0
-```
+Auf Oracle-basierten CM-Systemen zuerst die tatsächlich unterstützte Oracle-Syntax, Transaktions-/Read-Consistency-Semantik und das konkrete CM-Metadatenproblem separat verifizieren. Insbesondere `WITH UR` ist DB2-spezifisch.
 
-Danach sauber zurückbauen:
+Dieses Dokument soll nicht durch bloßes Entfernen von `WITH UR` in eine Oracle-Reparaturanleitung umgedeutet werden. Bei internen CM-Systemtabellen ist eine falsche „Portierung“ gefährlicher als ein fehlendes Rezept.
 
-```bash
-bin/cm-retention itemtype unassign TEST_ITEMTYPE --yes
-echo "RC=$?"
-```
+## 8. Bezug zu `cm-retention --backfill`
 
-Auch hier wird `RC=0` erwartet.
-
-## 11. Weitere Itemtypes und Produktion
-
-Erst nach erfolgreichem Pilot:
-
-1. weitere TEST-Views einzeln bearbeiten;
-2. jede View vorher sichern und danach prüfen;
-3. PROD mit einer **neuen** read-only Abfrage inventarisieren;
-4. PROD-Änderungen in einem abgestimmten Change durchführen.
-
-Keine Massenreparatur, solange nicht bewiesen ist, dass alle Treffer dieselbe Ursache und dieselbe fachliche Bedeutung haben.
-
-## 12. Neustart?
-
-Nach einer erfolgreich neu gespeicherten View ist normalerweise kein pauschaler Neustart von DB2, Library Server, Resource Manager, WebSphere oder ICN vorgesehen.
-
-Empfohlen:
-
-- Administration Client refreshen oder neu starten;
-- Tests mit einer neuen CM-Verbindung durchführen;
-- lang laufende Clients/Anwendungen nur bei nachgewiesenem Cacheproblem neu verbinden;
-- Serverkomponenten nicht prophylaktisch neu starten.
+Die DB2-/Oracle-Unterstützung des Backfills ist davon getrennt. `--backfill` schreibt ausschließlich die für den vorgesehenen Existing-Item-Workflow relevanten Root-Zeilen (`ICM$AUTODELETEDATE`) unter den dokumentierten NULL-/Fingerprint-Guards. Es repariert keine Component-View-Metadaten.
