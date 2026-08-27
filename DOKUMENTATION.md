@@ -1,4 +1,4 @@
-# cm-retention 0.3.3 – Betriebs- und Benutzerdokumentation
+# cm-retention 0.3.4 – Betriebs- und Benutzerdokumentation
 
 ## 1. Zweck
 
@@ -13,7 +13,7 @@ Das Werkzeug ist bewusst klein und administrativ gehalten. Es unterstützt:
 - mehrere wiederverwendbare Vorlagen unter `profiles/`
 - Assign/Unassign
 - Dry-run
-- Datei-Batch mit `--file`
+- Datei-Batch mit `--file` in einem nativen Java-Batch-Runtime
 - expliziten Existing-Item-Backfill mit `--backfill`
 - Policy-Defaults über `ret-policy.properties`
 
@@ -26,7 +26,7 @@ bin/cm-retention version
 Erwartet:
 
 ```text
-cm-retention 0.3.3
+cm-retention 0.3.4
 ```
 
 ## 3. Policy-Vorlagen
@@ -212,8 +212,6 @@ bin/cm-retention policy AUTO_DELETE_5Y
 
 Neben Retention-/Expiration-Parametern, Auto-Delete-Schedule, Commit-Count, Maximum Items, Maximum Duration und Force-Check-in zeigt der Befehl auch die **konkreten ItemTypes**, denen diese Policy aktuell zugewiesen ist.
 
-Beispiel für den unteren Teil der Ausgabe:
-
 ```text
 Assigned itemtypes:         3
   - AM
@@ -221,9 +219,7 @@ Assigned itemtypes:         3
   - INVOICE
 ```
 
-Die ItemTypes werden alphabetisch sortiert ausgegeben.
-
-Ist die Policy keinem ItemType zugewiesen, erscheint:
+Die ItemTypes werden alphabetisch sortiert ausgegeben. Ist die Policy keinem ItemType zugewiesen, erscheint:
 
 ```text
 Assigned itemtypes:         0
@@ -272,6 +268,8 @@ WHERE ICM$RETENTIONDATE IS NULL
 
 Wichtig: die physische Erstellungszeit-Spalte heißt `CREATETS`, nicht `ICM$CREATETS`.
 
+Seit 0.3.4 werden die sieben Backfill-Plan-Zähler pro Root-Tabelle in **einem** aggregierten SELECT ermittelt. Zuvor wurden dafür sieben einzelne COUNT-Abfragen ausgeführt. Die fachlichen Zähler und Safety-Prüfungen bleiben unverändert.
+
 Reale Ausführung:
 
 ```bash
@@ -280,7 +278,9 @@ bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
 
 Siehe zusätzlich [docs/BACKFILL.md](docs/BACKFILL.md).
 
-## 7. Batch
+## 7. Batch mit `--file`
+
+Beispieldatei:
 
 ```text
 # itemtypes.txt
@@ -301,7 +301,62 @@ Mit Backfill:
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 ```
 
-Vor dem ersten Write werden alle Einträge validiert. Die eigentliche Ausführung ist sequenziell und nicht atomar.
+Reale Ausführung:
+
+```bash
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
+```
+
+### Laufzeitmodell ab 0.3.4
+
+Der komplette `--file`-Auftrag läuft in **einem JVM-Prozess**. Es wird nicht mehr für jeden ItemType ein neuer Java-Prozess gestartet.
+
+Phase 1:
+
+```text
+1 JVM
+ -> CM-Verbindung öffnen
+ -> Ziel-Policy einmal auflösen
+ -> alle ItemTypes validieren
+ -> bei Backfill: eine DB2-Verbindung wiederverwenden
+ -> noch keine Änderungen
+```
+
+Bei `--backfill` wird die DB2-JDBC-Verbindung über den gesamten Batch wiederverwendet. Zusätzlich benötigt die Plan-Ermittlung nur noch einen aggregierten Tabellen-Scan pro ItemType statt sieben separater COUNT-Abfragen.
+
+Nach erfolgreicher Phase 1 wird genau einmal bestätigt. Vor Phase 2 wird die CM-Verbindung aus der Validierungsphase bewusst verworfen, damit die Write-Phase nicht auf eventuell gecachten Metadaten basiert.
+
+Phase 2 bleibt absichtlich **sequenziell, fail-fast und nicht atomar**:
+
+```text
+ItemType 1 -> Write -> Commit -> Reconnect/Verify
+ItemType 2 -> Write -> Commit -> Reconnect/Verify
+ItemType 3 -> ...
+```
+
+Bei Backfill:
+
+```text
+ItemType
+ -> DB2 Backfill
+ -> DB2 Commit/Verify
+ -> IBM CM Policy Assign
+ -> CM Reconnect/Verify
+ -> final DB2 + Policy Verify
+```
+
+Die bestehende Persistenzprüfung durch CM-Reconnect nach jedem Write bleibt erhalten. Wenn ein ItemType in Phase 2 fehlschlägt, wird der Batch sofort beendet; bereits erfolgreich abgeschlossene Änderungen bleiben committed.
+
+### Warum noch keine parallelen Writes?
+
+0.3.4 führt **keine parallelen DB2 UPDATEs oder IBM-CM-Writes** ein. Bei großen ICMUT-Tabellen könnten mehrere gleichzeitige UPDATEs unnötig DB2-Transaction-Log, I/O und Locking belasten. Zuerst wird der vermeidbare JVM-/Connection-/Scan-Overhead entfernt. Begrenzte Parallelität kann später getrennt und messbar bewertet werden.
+
+Die Ausgabe kennzeichnet den neuen Pfad mit:
+
+```text
+Batch mode (native Java runtime)
+  Runtime   : single JVM
+```
 
 ## 8. Sicherheitsmodell
 
@@ -310,6 +365,18 @@ Normaler Write:
 ```text
 resolve -> read -> validate -> plan -> confirm/dry-run -> mutate -> commit -> verify
 ```
+
+Batch:
+
+```text
+Phase 1: validate ALL
+ -> one confirmation
+ -> discard validation CM session
+ -> Phase 2 sequential writes
+ -> reconnect/verify after each CM write
+```
+
+Zusätzlich wird vor dem tatsächlichen Batch-Write der aktuelle ItemType-Zustand erneut gelesen. Hat sich die Policy-Zuweisung seit Phase 1 geändert, wird mit Exit-Code `5` abgebrochen. Beim Backfill werden außerdem Root-Komponente, Segment und Expiration-Semantik gegen den bestätigten Plan geprüft.
 
 Backfill:
 
@@ -334,18 +401,18 @@ Auf einem IBM-CM-8.7-Host mit echter `cmbicmsdk81.jar`:
 ./build.sh
 ```
 
-Version 0.3.3 erzeugt automatisch:
+Version 0.3.4 erzeugt automatisch:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.3.3.jar
+build/cm-retention-0.3.4.jar
 build/.version
 build/ret-policy.properties
 build/profiles/auto-delete-1y.properties
 build/profiles/auto-delete-5y.properties
 build/profiles/auto-delete-10y.properties
-build/cm-retention-0.3.3-runtime.tar.gz
-build/SHA256SUMS-0.3.3
+build/cm-retention-0.3.4-runtime.tar.gz
+build/SHA256SUMS-0.3.4
 ```
 
 Das Runtime-TAR.GZ ist für Zielserver ohne Git/javac gedacht und enthält auch die Policy-Vorlagen.
@@ -361,15 +428,15 @@ Auf dem Build-Host:
 Dann übertragen:
 
 ```text
-build/cm-retention-0.3.3-runtime.tar.gz
+build/cm-retention-0.3.4-runtime.tar.gz
 ```
 
 Auf dem Zielserver:
 
 ```bash
 cd /home/ibmcmadm
-tar -xzf cm-retention-0.3.3-runtime.tar.gz
-cd cm-retention-0.3.3
+tar -xzf cm-retention-0.3.4-runtime.tar.gz
+cd cm-retention-0.3.4
 cp .env.example .env
 chmod 600 .env
 vi .env
@@ -388,6 +455,7 @@ bin/cm-retention policies
 bin/cm-retention policy AUTO_DELETE_1Y
 bin/cm-retention itemtypes
 bin/cm-retention create profiles/auto-delete-1y.properties --dry-run
+bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --dry-run
 ```
 
 Bei `policy AUTO_DELETE_1Y` muss zusätzlich zur Policy-Konfiguration auch die aktuelle Verwendung angezeigt werden:
@@ -395,8 +463,6 @@ Bei `policy AUTO_DELETE_1Y` muss zusätzlich zur Policy-Konfiguration auch die a
 ```text
 Assigned itemtypes:         <Anzahl>
 ```
-
-Bei vorhandenen Zuweisungen folgen darunter die Namen der ItemTypes.
 
 Im Create-Plan muss erscheinen:
 
@@ -407,12 +473,11 @@ Limits       : 5000 items / 120 sec
 Force checkin: yes
 ```
 
-und als Properties-Quelle die verwendete Vorlage.
+Beim Batch-Dry-run muss im Kopf erscheinen:
 
-Zusätzlich sollte die klassische Syntax unverändert funktionieren:
-
-```bash
-bin/cm-retention create TEST_POLICY 30d --dry-run
+```text
+Batch mode (native Java runtime)
+  Runtime   : single JVM
 ```
 
 ## 12. Exit-Codes
@@ -423,5 +488,5 @@ bin/cm-retention create TEST_POLICY 30d --dry-run
 | 2 | CLI-/Config-/Properties-/Preflight-Fehler |
 | 3 | IBM-CM-/DB2-Laufzeitfehler |
 | 4 | ItemType/Policy nicht gefunden |
-| 5 | unsichere oder widersprüchliche Operation verweigert |
+| 5 | unsichere oder widersprüchliche Operation / stale plan verweigert |
 | 6 | Verifikationswarnung / Partial-Success-Situation |
