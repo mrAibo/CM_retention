@@ -1,10 +1,10 @@
 # Existing-item backfill before policy assignment
 
-This document describes the explicit `--backfill` workflow in `cm-retention 0.3.5`.
+This document describes the explicit `--backfill` workflow in `cm-retention 0.4.0`.
 
 ## Purpose
 
-Assigning an expiration policy to an IBM Content Manager ItemType does not retroactively populate expiration metadata for already existing root rows. `--backfill` is the explicit opt-in workflow for existing rows that do not yet have retention/auto-delete dates.
+Applying a system-controlled retention/expiration policy to an existing IBM Content Manager ItemType does not retroactively populate retention/expiration metadata for existing items. IBM documents that existing items require SQL or a custom API procedure. `--backfill` is the explicit opt-in workflow for that case.
 
 Normal assignment:
 
@@ -24,31 +24,101 @@ Always start with:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 ```
 
-Since 0.3.5 the single-item workflow and `--file` workflow share the same guarded Java execution engine. A single-item backfill no longer launches separate JVMs for plan/apply/assign/verify.
+The single-item and `--file` workflows share one guarded Java execution engine. Writes remain sequential.
 
-## Correct SQL semantics
+## Supported databases
 
-For eligible rows the tool performs the equivalent of:
+`cm-retention 0.4.0` supports direct existing-item backfill against:
+
+- IBM Db2
+- Oracle 19c as supported by IBM Content Manager 8.7
+
+All normal non-backfill commands continue to use the IBM CM SDK and do not depend on the direct-database dialect.
+
+The database is selected from the backfill JDBC URL:
+
+```text
+jdbc:db2:...     -> DB2
+jdbc:oracle:...  -> Oracle
+```
+
+It can also be fixed explicitly with:
+
+```dotenv
+BACKFILL_DB_TYPE=db2
+```
+
+or:
+
+```dotenv
+BACKFILL_DB_TYPE=oracle
+```
+
+A configured type that conflicts with the JDBC URL is rejected.
+
+## Common logical SQL
+
+For eligible rows the logical operation is:
 
 ```sql
-UPDATE ICMADMIN.<ROOT_TABLE>
+UPDATE <SCHEMA>.<ROOT_TABLE>
 SET ICM$AUTODELETEDATE = CREATETS + <POLICY_EXPIRATION>
 WHERE ICM$RETENTIONDATE IS NULL
   AND ICM$AUTODELETEDATE IS NULL
   AND CREATETS IS NOT NULL;
 ```
 
-The creation timestamp column is `CREATETS`, **not** `ICM$CREATETS`.
+The physical creation timestamp column is `CREATETS`, **not** `ICM$CREATETS`.
 
-For a one-year policy:
+IBM documents `CreateTS`, `ICM$RetentionDate`, and `ICM$AutoDeleteDate` on the `ICMUTnnnnnsss` component-root table.
 
-```text
-Formula : ICM$AUTODELETEDATE = CREATETS + 1 YEAR
+## DB2 SQL dialect
+
+Examples:
+
+```sql
+CREATETS + 1 YEAR
+CREATETS + 6 MONTHS
+CREATETS + 52 WEEKS
+CREATETS + 365 DAYS
 ```
 
-The duration is read from the selected IBM CM policy and is not hard-coded. Supported DB2 duration forms include `1 YEAR`, `6 MONTHS`, `52 WEEKS` and `365 DAYS`.
+The detailed plan compares calculated dates with:
 
-`ICM$RETENTIONDATE` remains NULL because this backfill supports only policies where retention itself is disabled and expiration/AUTO_DELETE is enabled.
+```sql
+CURRENT TIMESTAMP
+```
+
+The Phase-2 fail-fast existence probe ends with:
+
+```sql
+FETCH FIRST 1 ROW ONLY
+```
+
+## Oracle SQL dialect
+
+Oracle timestamp arithmetic is generated without NLS-dependent string/date conversion:
+
+```sql
+CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
+CREATETS + NUMTOYMINTERVAL(6, 'MONTH')
+CREATETS + NUMTODSINTERVAL(364, 'DAY')   -- 52 weeks
+CREATETS + NUMTODSINTERVAL(365, 'DAY')
+```
+
+The detailed plan uses:
+
+```sql
+CURRENT_TIMESTAMP
+```
+
+The fail-fast existence probe uses:
+
+```sql
+AND ROWNUM = 1
+```
+
+`WEEK` is converted to an exact number of days (`amount * 7`). No user-provided SQL fragment is accepted.
 
 ## Supported policy type
 
@@ -62,21 +132,28 @@ Expiration action  AUTO_DELETE
 Expiration period  > 0
 ```
 
-Event-driven, retention-enabled, non-AUTO_DELETE and unsupported time-unit cases are refused.
+Supported units are YEAR, MONTH, WEEK, and DAY. Event-driven, retention-enabled, non-AUTO_DELETE, and unsupported-unit cases fail closed.
 
-## Root table resolution
+## Root-table resolution
 
-The user never supplies an `ICMUT...` table name. The tool resolves the root component from CM metadata using the ItemType ID and `PARENTCOMPTYPEID=0`, then derives:
+The user never supplies an `ICMUT...` table name. The tool resolves the root component using the ItemType ID and CM library-server metadata:
+
+```text
+ICMSTCOMPDEFS
+ICMSTITEMTYPEDEFS
+```
+
+It then derives:
 
 ```text
 ICMUT<COMPONENTTYPEID><SEGMENTID>
 ```
 
-The generated identifier is validated before use. Multi-segment cases continue to fail closed.
+The generated identifier and schema are strictly validated before insertion into SQL. Multi-segment cases continue to fail closed.
 
 ## Detailed dry-run plan
 
-Example:
+Example DB2 output:
 
 ```text
 Existing-item backfill plan
@@ -100,33 +177,52 @@ Already auto-delete dated : 15
 Retention date already set: 0
 ```
 
-`Immediately expired after` is critical: those rows receive an auto-delete date already in the past and can become eligible for AUTO_DELETE after policy assignment.
+Equivalent Oracle formula output is, for example:
 
-The seven plan counters are calculated by **one aggregate SELECT per root table** rather than seven independent COUNT queries.
+```text
+Formula                   : ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
+```
+
+`Immediately expired after` is critical: those rows receive a date already in the past and can become eligible for AUTO_DELETE after policy assignment.
+
+The seven report counters are calculated by **one aggregate SELECT per root table**.
 
 ## Phase-2 fast path
 
-0.3.5 deliberately separates the user-visible detailed plan from the final pre-write check.
+The detailed Phase-1/dry-run aggregate is not repeated immediately before the write. Phase 2 freshly revalidates ItemType/Policy/root metadata and only probes whether an eligible row has `NULL CREATETS`.
 
-Phase 2 does **not** rebuild the full seven-counter plan and therefore does not repeat the expensive aggregate scan immediately before UPDATE. Instead it re-reads the critical metadata and performs only a fail-fast query for an eligible row with `NULL CREATETS`:
+DB2 conceptually uses:
 
 ```sql
 SELECT 1
-FROM ICMADMIN.<ROOT_TABLE>
+FROM <SCHEMA>.<ROOT_TABLE>
 WHERE ICM$RETENTIONDATE IS NULL
   AND ICM$AUTODELETEDATE IS NULL
   AND CREATETS IS NULL
 FETCH FIRST 1 ROW ONLY;
 ```
 
-If such a row exists, the backfill is refused before the UPDATE.
+Oracle uses:
 
-## Policy fingerprint
+```sql
+SELECT 1
+FROM <SCHEMA>.<ROOT_TABLE>
+WHERE ICM$RETENTIONDATE IS NULL
+  AND ICM$AUTODELETEDATE IS NULL
+  AND CREATETS IS NULL
+  AND ROWNUM = 1;
+```
 
-Phase 1 records an immutable fingerprint of the selected IBM CM policy:
+If such a row exists, no UPDATE is started.
+
+## Policy and root fingerprints
+
+Phase 1 records immutable fingerprints of the selected Policy and physical root identity.
+
+Policy fingerprint:
 
 ```text
-policy name
+name
 retention type/enabled/period/unit
 expiration enabled/period/unit/action
 auto-delete schedule
@@ -136,69 +232,97 @@ max duration
 force check-in
 ```
 
-The fingerprint is compared with freshly retrieved policy metadata:
-
-1. after validation and immediately before DB2 backfill;
-2. after DB2 COMMIT and immediately before policy assignment;
-3. during final verification.
-
-This prevents a policy with the same name but changed semantics from being assigned after existing rows were calculated with the old semantics.
-
-### Exit behavior for policy changes
-
-If the mismatch is detected **before** a relevant DB2 write, the command fails with exit `5` and performs no backfill mutation.
-
-If rows have already been committed to DB2 and the policy is then found changed, the workflow returns exit `6` and **does not assign the changed policy**. The committed backfill remains visible as an explicit partial-success state for review/recovery.
-
-## Root fingerprint
-
-Phase 1 also records:
+Root fingerprint:
 
 ```text
 ItemTypeID
 ComponentTypeID
 SegmentID
-root ICMUT table name
+ICMUT table
 ```
 
-The root identity is revalidated before UPDATE, after DB2 COMMIT before assignment, and during final verification. A changed root mapping is therefore never silently followed.
+They are checked again:
+
+1. immediately before the database UPDATE;
+2. after database COMMIT and before policy assignment;
+3. during final verification.
+
+If the mismatch occurs before the database write, the command returns exit `5`. If database rows were already committed and a later guard fails, the command returns exit `6` and does **not** start policy assignment.
 
 ## Safety rules
 
 1. Only rows where both `ICM$RETENTIONDATE` and `ICM$AUTODELETEDATE` are NULL are changed.
 2. Existing retention/auto-delete dates are never overwritten.
-3. NULL `CREATETS` causes refusal before update.
+3. NULL `CREATETS` causes refusal before UPDATE.
 4. A different currently assigned policy causes refusal.
 5. Re-running the same backfill is idempotent for rows already updated.
-6. Policy and root fingerprints are frozen during Phase 1 and revalidated around the DB2/CM boundary.
-7. DB2 UPDATE is committed and residual NULL rows are verified before IBM CM policy assignment begins.
-8. If eligible NULL rows remain after the update, policy assignment does not start and exit `6` is returned.
+6. Policy/root fingerprints are revalidated around the direct-database/CM boundary.
+7. UPDATE is committed and residual NULL rows are verified before IBM CM policy assignment begins.
+8. If eligible NULL rows remain after UPDATE, policy assignment does not start and exit `6` is returned.
 9. A policy/root change after a committed backfill blocks assignment and returns exit `6`.
-10. After assignment, a fresh CM session verifies the actual assignment and policy fingerprint; DB2 verification checks residual NULL rows and root identity.
+10. After assignment, a fresh CM session verifies actual persisted state.
 11. Multi-segment cases fail closed.
-12. Writes remain sequential; no parallel DB2 UPDATEs are introduced.
+12. Writes remain sequential; no parallel direct-database UPDATEs are used.
+13. The tool never calls `deleteExpiredItems()` and never directly deletes documents.
 
-## Ordering and partial-success behavior
+## Transaction boundary
 
 ```text
 detailed plan + fingerprints
-  -> confirm or dry-run
+  -> confirm/dry-run
   -> fresh ItemType/Policy/Root guard
-  -> cheap NULL-CREATETS preflight
-  -> DB2 UPDATE
-  -> DB2 COMMIT
-  -> verify no eligible NULL rows remain
+  -> cheap NULL-CREATETS probe
+  -> direct database UPDATE
+  -> database COMMIT
+  -> residual-NULL verification
   -> fresh post-COMMIT ItemType/Policy/Root guard
   -> IBM CM policy assignment
-  -> reconnect/persisted-state verification
-  -> final Policy/Root/assignment/DB2 verification
+  -> CM reconnect/persisted-state verification
+  -> final Policy/Root/assignment/database verification
 ```
 
-DB2 backfill and IBM CM API assignment are not one distributed transaction. Therefore a failure after DB2 COMMIT can leave a committed backfill without a completed policy assignment. This is surfaced with exit `6`; the tool does not hide the condition.
+The direct database transaction and IBM CM API assignment are not one distributed transaction. A failure after database COMMIT can therefore leave backfilled rows without a completed policy assignment. This is deliberately exposed with exit `6`.
 
-## Existing same policy
+## Configuration: preferred neutral form
 
-If the ItemType already uses the requested policy, `--backfill` remains allowed as a recovery operation for residual NULL rows. If a different policy is assigned, backfill is refused.
+### DB2
+
+```dotenv
+BACKFILL_DB_TYPE=db2
+BACKFILL_JDBC_URL=jdbc:db2:LSDB
+BACKFILL_USER=icmadmin
+BACKFILL_PASSWORD=<password>
+BACKFILL_SCHEMA=ICMADMIN
+BACKFILL_JDBC_JAR=/opt/IBM/db2/V11.5/java/db2jcc4.jar
+```
+
+Type-4 example:
+
+```dotenv
+BACKFILL_JDBC_URL=jdbc:db2://dbhost.example:50000/LSDB
+```
+
+For backward compatibility, the old `DB2_DATABASE`, `DB2_JDBC_URL`, `DB2_USER`, `DB2_PASSWORD`, `DB2_SCHEMA`, and `DB2_JDBC_JAR` names remain accepted. If no backfill database settings exist at all, the legacy DB2 default `jdbc:db2:<CM_DATABASE>` remains in effect.
+
+### Oracle 19c
+
+```dotenv
+ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
+BACKFILL_DB_TYPE=oracle
+BACKFILL_JDBC_URL=jdbc:oracle:thin:@//dbhost.example:1521/LSDB
+BACKFILL_USER=icmconct
+BACKFILL_PASSWORD=<password>
+BACKFILL_SCHEMA=ICMADMIN
+BACKFILL_JDBC_JAR=/u01/app/oracle/product/19.0.0/dbhome_1/jdbc/lib/ojdbc8.jar
+```
+
+IBM Content Manager 8.7 requires `ojdbc8.jar` for Oracle users. The launcher can find it automatically under `$ORACLE_HOME/jdbc/lib` or known IBM/WAS locations; an explicit `BACKFILL_JDBC_JAR` is the most deterministic option.
+
+Oracle requires an explicit JDBC URL. The tool does not manufacture a listener/service string from `CM_DATABASE`.
+
+Oracle aliases `ORACLE_JDBC_URL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`, and `ORACLE_JDBC_JAR` are also accepted, but `BACKFILL_*` is preferred.
+
+The direct-database user needs SELECT access to the relevant CM metadata/root tables and UPDATE permission on target root tables.
 
 ## Single-item runtime
 
@@ -207,98 +331,54 @@ bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
 ```
 
-Both commands run one native Java workflow. Output includes plan and execution timings, e.g.:
+The real execution output explicitly identifies the selected database:
 
 ```text
-Plan timing                : 1.234 sec
-Timing                    : preflight ... / DB2 ... / post-commit guard ... / CM ... / verify ... / total ...
+Applying existing-item backfill
+  Database         : Oracle
+  Item type        : AM
+  ...
 ```
 
 ## Batch backfill
 
-File:
-
-```text
-# itemtypes.txt
-AM
-INVOICE
-CONTRACT
-```
-
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
-bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-All ItemTypes are fully planned/validated before the first mutation. Actual execution remains sequential, fail-fast and non-atomic.
+The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService` reuses one JDBC connection across the batch. Phase 1 still validates every ItemType before the first mutation; Phase 2 remains sequential, fail-fast, and non-atomic.
 
-### Batch performance model in 0.3.5
+## Self-test
 
-- one JVM for the complete file workflow
-- one Phase-1 bulk ItemType metadata load, then in-memory exact-name lookup
-- target policy resolved/fingerprinted once during validation
-- one `BackfillService` reuses one DB2 JDBC connection across Phase 1 and Phase 2
-- one aggregate statistics query per Phase-1 root table
-- no repeated full aggregate plan scan in Phase 2
-- validation CM session deliberately discarded before writes
-- reconnect-based persisted-state verification retained after CM writes
-- phase and per-ItemType timings are printed
+`./build.sh` runs `SelfTestMain` before packaging. The test does not log in to CM and does not open DB2/Oracle connections. It verifies, among other things:
 
-No parallel DB2 UPDATEs are used. Sequential writes are intentional to avoid multiplying transaction-log, I/O and lock pressure on large CM root tables.
+- DB2 and Oracle JDBC URL detection
+- DB2 YEAR/MONTH/WEEK/DAY duration syntax
+- Oracle `NUMTOYMINTERVAL` / `NUMTODSINTERVAL` generation
+- Oracle WEEK-to-DAY conversion
+- DB2 `CURRENT TIMESTAMP`
+- Oracle `CURRENT_TIMESTAMP`
+- DB2 `FETCH FIRST 1 ROW ONLY`
+- Oracle `ROWNUM = 1`
+- `CREATETS` rather than the incorrect `ICM$CREATETS`
+- UPDATE NULL guards
 
-## DB2 configuration
-
-Normal non-backfill commands do not need additional DB2 settings.
-
-Optional `.env` values:
-
-```dotenv
-DB2_DATABASE=LSDB
-DB2_JDBC_URL=jdbc:db2:LSDB
-DB2_USER=icmadmin
-DB2_PASSWORD=<password>
-DB2_SCHEMA=ICMADMIN
-DB2_JDBC_JAR=/opt/IBM/db2/V11.5/java/db2jcc4.jar
-```
-
-Defaults:
-
-- `DB2_DATABASE` -> `CM_DATABASE`
-- `DB2_USER` -> `CM_USER`
-- `DB2_PASSWORD` -> `CM_PASSWORD`
-- `DB2_SCHEMA` -> `ICMADMIN`
-
-If the CM alias is not a usable DB2 alias, configure a JDBC URL explicitly, for example:
-
-```dotenv
-DB2_JDBC_URL=jdbc:db2://dbhost.example:50000/LSDB
-```
-
-The DB2 user needs SELECT access to the relevant CM metadata/root tables and UPDATE permission for the target root table.
-
-## Build/self-test
-
-`./build.sh` in 0.3.5 automatically runs the pure `SelfTestMain` before packaging. Among other checks it asserts that generated backfill SQL uses `CREATETS`, never `ICM$CREATETS`, and preserves the NULL guards.
-
-Manual test after build:
+Manual test:
 
 ```bash
 bin/cm-retention selftest
 ```
 
-This does not log in to CM and does not connect to DB2.
-
 ## Recommended production procedure
 
-1. Run `bin/cm-retention selftest` after deployment.
-2. Run `status` against the intended environment.
-3. Inspect the target policy with `policy POLICY`.
+1. Run `selftest`, `doctor`, and `status` after deployment.
+2. Inspect the target policy with `policy POLICY`.
+3. Confirm the intended direct database URL/schema/user in the protected `.env`.
 4. Run the exact `--backfill --dry-run` command.
-5. Review root table, `CREATETS` formula, eligible count and immediately-expired count.
-6. Review reported Phase-1 timing on large ItemTypes.
-7. Ensure backup/change controls are in place.
-8. Run the real command.
-9. Check the return code; treat `6` as a possible persisted/partial-success condition.
-10. Re-run dry-run/status checks and inspect ItemType/policy.
-11. Review IBM CM/DB2 logs if exit `6` or another warning occurred.
+5. Review root table, generated formula, eligible count, immediately-expired count, and selected database.
+6. Ensure database backup/change controls are in place.
+7. Run the real command.
+8. Inspect the return code; treat `6` as a possible persisted/partial-success condition.
+9. Re-run dry-run/status checks and inspect ItemType/policy state.
+10. Review IBM CM and DB2/Oracle logs if any warning/error occurred.
