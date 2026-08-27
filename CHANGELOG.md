@@ -2,6 +2,29 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.3.5
+
+Safety and fast-path hardening after the native batch refactor:
+
+- added immutable Policy fingerprints covering retention/expiration semantics, schedule, delete limits and force-checkin
+- added immutable Root fingerprints covering ItemTypeID, ComponentTypeID, SegmentID and generated ICMUT root table
+- backfill now revalidates Policy/Root/ItemType state before DB2 UPDATE, after DB2 COMMIT before policy assignment, and during final verification
+- a stale Policy/Root detected before the DB2 write is refused with exit code `5`
+- a stale Policy/Root detected after a committed changed-row backfill blocks policy assignment and surfaces exit code `6`
+- split the detailed backfill statistics plan from the Phase-2 write preflight; Phase 2 no longer repeats the full aggregate ICMUT scan
+- Phase-2 preflight uses fresh metadata plus a fail-fast `NULL CREATETS` existence check
+- `--file` Phase 1 now loads the ItemType metadata collection once and resolves exact names from an in-memory map instead of one retrieveEntity round-trip per line
+- `requirePolicy()` now directly retrieves the named Policy; missing Policy remains exit code `4`
+- `policies` now loads Policy and ItemType collections in bulk and calculates assignment counts in memory
+- single-item `assign ITEMTYPE POLICY --backfill` now runs through one native JVM and the same guarded BackfillWorkflow as batch mode
+- batch/single backfill output now reports phase, ItemType and DB2/CM verification timings in seconds
+- added pure `selftest` regression checks for age parsing, template detection, Policy/Root fingerprints, generated `CREATETS` SQL and timing units
+- `build.sh` automatically runs the pure self-test before packaging; runtime bundle includes `tests/selftest.sh`
+- removed the undocumented `CM_RETENTION_POLICY_PROPERTIES` template-path override; use `--properties FILE`, automatic readable-file syntax, or the standard `ret-policy.properties`
+- policy and ItemType detail output now labels auto-delete maximum duration explicitly as seconds
+- no parallel DB2/CM writes and no chunked backfill were introduced; writes remain sequential/fail-fast pending real timing measurements
+- bumped runtime/package version to `0.3.5`
+
 ## 0.3.4
 
 Native single-JVM batch performance update:

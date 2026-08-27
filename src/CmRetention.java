@@ -6,7 +6,7 @@ import java.nio.file.Paths;
 import java.util.Locale;
 
 public final class CmRetention {
-    static final String VERSION = "0.3.4";
+    static final String VERSION = "0.3.5";
 
     private CmRetention() {}
 
@@ -15,6 +15,10 @@ public final class CmRetention {
         CmService service = null;
         try {
             String[] args = normalizeCreateTemplateArgs(rawArgs);
+            if (args.length == 1 && "selftest".equals(args[0])) {
+                SelfTestMain.run();
+                return;
+            }
             printCreateShortcutHelp(args);
             if (CmCli.handleHelpOrVersionWithoutConfig(args)) {
                 return;
@@ -67,7 +71,7 @@ public final class CmRetention {
      * readable regular file. Explicit --properties always wins and is left
      * untouched. Advanced option values are not mistaken for positional args.
      */
-    private static String[] normalizeCreateTemplateArgs(String[] args) {
+    static String[] normalizeCreateTemplateArgs(String[] args) {
         if (args == null || args.length < 2 || !"create".equals(args[0])) {
             return args == null ? new String[0] : args;
         }

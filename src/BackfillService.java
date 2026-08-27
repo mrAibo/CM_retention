@@ -15,15 +15,14 @@ import java.util.Locale;
 /**
  * Direct DB2 backfill support for existing root-component rows.
  *
- * This class is intentionally separate from CmService: CmService owns IBM CM
- * API mutations, while this service owns the explicit SQL backfill requested
- * through --backfill.
- *
  * One BackfillService instance lazily opens one DB2 connection and reuses it
- * for its lifetime. BatchMain therefore avoids reconnecting to DB2 for every
- * ItemType. Call closeQuietly() when the workflow is complete.
+ * for its lifetime. The detailed plan performs one aggregate root-table scan;
+ * the pre-write path deliberately does not repeat that scan.
  */
 final class BackfillService {
+    private static final String MISSING_DATES =
+            "ICM$RETENTIONDATE IS NULL AND ICM$AUTODELETEDATE IS NULL";
+
     private final BackfillConfig config;
     private Connection connection;
 
@@ -31,6 +30,7 @@ final class BackfillService {
         this.config = config;
     }
 
+    /** Detailed, read-only plan used by dry-run/Phase 1. */
     BackfillPlan plan(DKItemTypeDefICM itemType,
                       DKRetentionPolicyDefICM policy,
                       String currentPolicy,
@@ -39,44 +39,65 @@ final class BackfillService {
         validateAssignmentState(currentPolicy, targetPolicy);
 
         Connection db = connection();
-        RootTable root = resolveRootTable(db, itemType.getIntId());
+        RootFingerprint root = resolveRootFingerprint(db, itemType.getIntId());
         String table = qualified(root.tableName);
         String duration = durationSql(policy);
-        String expirationExpression = "CREATETS + " + duration;
-        String missing = "ICM$RETENTIONDATE IS NULL AND ICM$AUTODELETEDATE IS NULL";
-
-        // Keep all plan counters in one aggregate SELECT. The previous
-        // implementation issued seven independent COUNT queries, which could
-        // scan a large ICMUT root table repeatedly.
-        String sql = "SELECT "
-                + "COUNT(*), "
-                + "SUM(CASE WHEN " + missing + " THEN 1 ELSE 0 END), "
-                + "SUM(CASE WHEN " + missing + " AND CREATETS IS NOT NULL THEN 1 ELSE 0 END), "
-                + "SUM(CASE WHEN " + missing + " AND CREATETS IS NULL THEN 1 ELSE 0 END), "
-                + "SUM(CASE WHEN " + missing + " AND CREATETS IS NOT NULL AND "
-                + expirationExpression + " <= CURRENT TIMESTAMP THEN 1 ELSE 0 END), "
-                + "SUM(CASE WHEN ICM$AUTODELETEDATE IS NOT NULL THEN 1 ELSE 0 END), "
-                + "SUM(CASE WHEN ICM$RETENTIONDATE IS NOT NULL THEN 1 ELSE 0 END) "
-                + "FROM " + table;
-        long[] counts = queryCounts(db, sql, 7);
+        long[] counts = queryCounts(db, buildPlanSql(table, duration), 7);
 
         return new BackfillPlan(
                 itemType.getName(), targetPolicy, CmService.normalizePolicy(currentPolicy),
-                itemType.getIntId(), root.componentTypeId, root.segmentId, root.tableName,
-                policy.getExpirationTimePeriod(), sqlUnit(policy.getDefaultExpirationTimeUnit()),
-                duration, counts[0], counts[1], counts[2], counts[3],
+                root, PolicyFingerprint.from(policy), duration,
+                counts[0], counts[1], counts[2], counts[3],
                 counts[4], counts[5], counts[6]);
     }
 
-    BackfillResult apply(BackfillPlan plan) throws Exception {
-        if (plan.missingCreateTimestampRows > 0) {
-            throw new CliException("Backfill refused: " + plan.missingCreateTimestampRows
-                    + " eligible row(s) have NULL CREATETS and cannot be calculated.", 5);
+    /**
+     * Cheap stale-plan check immediately before UPDATE.
+     *
+     * It intentionally avoids rebuilding the detailed aggregate plan. The only
+     * root-data query checks whether a currently eligible row has NULL CREATETS;
+     * root identity and policy semantics are compared against Phase 1.
+     */
+    BackfillWritePlan prepareWrite(DKItemTypeDefICM itemType,
+                                   DKRetentionPolicyDefICM policy,
+                                   String currentPolicy,
+                                   String targetPolicy,
+                                   BackfillPlan validated) throws Exception {
+        if (validated == null) {
+            throw new CliException("Internal backfill error: missing validated plan", 2);
         }
-        if (plan.fillableRows == 0) {
-            return new BackfillResult(0, 0);
+        validatePolicy(policy);
+        validateAssignmentState(currentPolicy, targetPolicy);
+
+        if (!validated.itemTypeName.equals(itemType.getName())
+                || !validated.policyName.equals(targetPolicy)) {
+            throw new CliException("Backfill target changed after validation. Re-run the operation.", 5);
         }
 
+        PolicyFingerprint currentPolicyFingerprint = PolicyFingerprint.from(policy);
+        validated.policyFingerprint.requireSame(
+                currentPolicyFingerprint, "after validation and before DB2 backfill", 5);
+
+        Connection db = connection();
+        RootFingerprint currentRoot = resolveRootFingerprint(db, itemType.getIntId());
+        validated.rootFingerprint.requireSame(
+                currentRoot, "after validation and before DB2 backfill", 5);
+        validateSegment(currentRoot, 5);
+
+        String table = qualified(currentRoot.tableName);
+        if (queryExists(db, "SELECT 1 FROM " + table
+                + " WHERE " + MISSING_DATES
+                + " AND CREATETS IS NULL FETCH FIRST 1 ROW ONLY")) {
+            throw new CliException("Backfill refused: at least one eligible row has NULL CREATETS.", 5);
+        }
+
+        return new BackfillWritePlan(
+                itemType.getName(), targetPolicy, CmService.normalizePolicy(currentPolicy),
+                currentRoot, currentPolicyFingerprint, validated.durationSql,
+                validated.fillableRows);
+    }
+
+    BackfillResult apply(BackfillWritePlan plan) throws Exception {
         Connection db = connection();
         boolean committed = false;
         int updated = 0;
@@ -85,12 +106,8 @@ final class BackfillService {
             if (originalAutoCommit) {
                 db.setAutoCommit(false);
             }
-            String table = qualified(plan.tableName);
-            String sql = "UPDATE " + table
-                    + " SET ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql
-                    + " WHERE ICM$RETENTIONDATE IS NULL"
-                    + " AND ICM$AUTODELETEDATE IS NULL"
-                    + " AND CREATETS IS NOT NULL";
+            String table = qualified(plan.rootFingerprint.tableName);
+            String sql = buildUpdateSql(table, plan.durationSql);
 
             Statement statement = db.createStatement();
             try {
@@ -102,9 +119,7 @@ final class BackfillService {
             committed = true;
 
             long remaining = queryLong(db,
-                    "SELECT COUNT(*) FROM " + table
-                            + " WHERE ICM$RETENTIONDATE IS NULL"
-                            + " AND ICM$AUTODELETEDATE IS NULL");
+                    "SELECT COUNT(*) FROM " + table + " WHERE " + MISSING_DATES);
             if (remaining != 0) {
                 throw new CliException("Backfill committed " + updated + " row(s), but " + remaining
                         + " row(s) still have NULL retention/auto-delete metadata."
@@ -126,25 +141,30 @@ final class BackfillService {
     }
 
     long remainingMissing(DKItemTypeDefICM itemType,
-                          DKRetentionPolicyDefICM policy,
+                          RootFingerprint expectedRoot,
                           String currentPolicy,
                           String targetPolicy) throws Exception {
-        validatePolicy(policy);
         if (!targetPolicy.equals(CmService.normalizePolicy(currentPolicy))) {
             throw new CliException("Verification failed: itemtype " + itemType.getName()
                     + " uses " + CmService.emptyAsDash(currentPolicy)
                     + " instead of " + targetPolicy, 6);
         }
         Connection db = connection();
-        RootTable root = resolveRootTable(db, itemType.getIntId());
-        if (root.segmentId != 1) {
-            throw new CliException("Backfill verification refused: ItemType uses component SegmentID "
-                    + root.segmentId + ". Multi-segment backfill is not implemented.", 6);
-        }
+        RootFingerprint currentRoot = resolveRootFingerprint(db, itemType.getIntId());
+        expectedRoot.requireSame(currentRoot, "during final verification", 6);
+        validateSegment(currentRoot, 6);
         return queryLong(db,
-                "SELECT COUNT(*) FROM " + qualified(root.tableName)
-                        + " WHERE ICM$RETENTIONDATE IS NULL"
-                        + " AND ICM$AUTODELETEDATE IS NULL");
+                "SELECT COUNT(*) FROM " + qualified(currentRoot.tableName)
+                        + " WHERE " + MISSING_DATES);
+    }
+
+    void requireRootUnchanged(DKItemTypeDefICM itemType,
+                              RootFingerprint expectedRoot,
+                              String stage,
+                              int exitCode) throws Exception {
+        RootFingerprint currentRoot = resolveRootFingerprint(connection(), itemType.getIntId());
+        expectedRoot.requireSame(currentRoot, stage, exitCode);
+        validateSegment(currentRoot, exitCode);
     }
 
     void closeQuietly() {
@@ -156,6 +176,28 @@ final class BackfillService {
         } catch (Exception ignored) {
             // Best-effort cleanup.
         }
+    }
+
+    static String buildPlanSql(String qualifiedTable, String duration) {
+        String expirationExpression = "CREATETS + " + duration;
+        return "SELECT "
+                + "COUNT(*), "
+                + "SUM(CASE WHEN " + MISSING_DATES + " THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN " + MISSING_DATES + " AND CREATETS IS NOT NULL THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN " + MISSING_DATES + " AND CREATETS IS NULL THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN " + MISSING_DATES + " AND CREATETS IS NOT NULL AND "
+                + expirationExpression + " <= CURRENT TIMESTAMP THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN ICM$AUTODELETEDATE IS NOT NULL THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN ICM$RETENTIONDATE IS NOT NULL THEN 1 ELSE 0 END) "
+                + "FROM " + qualifiedTable;
+    }
+
+    static String buildUpdateSql(String qualifiedTable, String duration) {
+        return "UPDATE " + qualifiedTable
+                + " SET ICM$AUTODELETEDATE = CREATETS + " + duration
+                + " WHERE ICM$RETENTIONDATE IS NULL"
+                + " AND ICM$AUTODELETEDATE IS NULL"
+                + " AND CREATETS IS NOT NULL";
     }
 
     private Connection connection() throws Exception {
@@ -172,7 +214,7 @@ final class BackfillService {
         return connection;
     }
 
-    private RootTable resolveRootTable(Connection db, int itemTypeId) throws SQLException {
+    private RootFingerprint resolveRootFingerprint(Connection db, int itemTypeId) throws SQLException {
         String sql = "SELECT C.COMPONENTTYPEID, I.SEGMENTID"
                 + " FROM " + config.schema + ".ICMSTCOMPDEFS C"
                 + " JOIN " + config.schema + ".ICMSTITEMTYPEDEFS I"
@@ -197,7 +239,7 @@ final class BackfillService {
                 if (!tableName.matches("ICMUT[0-9]+")) {
                     throw new CliException("Unsafe generated root table name: " + tableName, 5);
                 }
-                return new RootTable(componentTypeId, segmentId, tableName);
+                return new RootFingerprint(itemTypeId, componentTypeId, segmentId, tableName);
             } finally {
                 rs.close();
             }
@@ -232,6 +274,20 @@ final class BackfillService {
             try {
                 if (!rs.next()) throw new SQLException("COUNT query returned no row");
                 return rs.getLong(1);
+            } finally {
+                rs.close();
+            }
+        } finally {
+            statement.close();
+        }
+    }
+
+    private boolean queryExists(Connection db, String sql) throws SQLException {
+        Statement statement = db.createStatement();
+        try {
+            ResultSet rs = statement.executeQuery(sql);
+            try {
+                return rs.next();
             } finally {
                 rs.close();
             }
@@ -275,6 +331,14 @@ final class BackfillService {
         }
     }
 
+    private static void validateSegment(RootFingerprint root, int exitCode) {
+        if (root.segmentId != 1) {
+            throw new CliException("Backfill refused: ItemType uses component SegmentID "
+                    + root.segmentId + ". Multi-segment backfill is not implemented; refusing"
+                    + " to update only one segment.", exitCode);
+        }
+    }
+
     private static String durationSql(DKRetentionPolicyDefICM policy) {
         int amount = policy.getExpirationTimePeriod();
         String unit = sqlUnit(policy.getDefaultExpirationTimeUnit());
@@ -314,24 +378,14 @@ final class BackfillService {
             closeQuietly();
         }
     }
-
-    private static final class RootTable {
-        final int componentTypeId;
-        final int segmentId;
-        final String tableName;
-
-        RootTable(int componentTypeId, int segmentId, String tableName) {
-            this.componentTypeId = componentTypeId;
-            this.segmentId = segmentId;
-            this.tableName = tableName;
-        }
-    }
 }
 
 final class BackfillPlan {
     final String itemTypeName;
     final String policyName;
     final String currentPolicy;
+    final RootFingerprint rootFingerprint;
+    final PolicyFingerprint policyFingerprint;
     final int itemTypeId;
     final int componentTypeId;
     final int segmentId;
@@ -348,20 +402,21 @@ final class BackfillPlan {
     final long retentionDateRows;
 
     BackfillPlan(String itemTypeName, String policyName, String currentPolicy,
-                 int itemTypeId, int componentTypeId, int segmentId, String tableName,
-                 int expirationAmount, String expirationUnit, String durationSql,
-                 long totalRows, long missingRows, long fillableRows,
+                 RootFingerprint rootFingerprint, PolicyFingerprint policyFingerprint,
+                 String durationSql, long totalRows, long missingRows, long fillableRows,
                  long missingCreateTimestampRows, long immediatelyExpiredRows,
                  long existingAutoDeleteRows, long retentionDateRows) {
         this.itemTypeName = itemTypeName;
         this.policyName = policyName;
         this.currentPolicy = currentPolicy;
-        this.itemTypeId = itemTypeId;
-        this.componentTypeId = componentTypeId;
-        this.segmentId = segmentId;
-        this.tableName = tableName;
-        this.expirationAmount = expirationAmount;
-        this.expirationUnit = expirationUnit;
+        this.rootFingerprint = rootFingerprint;
+        this.policyFingerprint = policyFingerprint;
+        this.itemTypeId = rootFingerprint.itemTypeId;
+        this.componentTypeId = rootFingerprint.componentTypeId;
+        this.segmentId = rootFingerprint.segmentId;
+        this.tableName = rootFingerprint.tableName;
+        this.expirationAmount = policyFingerprint.expirationAmount;
+        this.expirationUnit = policyFingerprint.expirationUnit;
         this.durationSql = durationSql;
         this.totalRows = totalRows;
         this.missingRows = missingRows;
@@ -373,6 +428,28 @@ final class BackfillPlan {
     }
 }
 
+final class BackfillWritePlan {
+    final String itemTypeName;
+    final String policyName;
+    final String currentPolicy;
+    final RootFingerprint rootFingerprint;
+    final PolicyFingerprint policyFingerprint;
+    final String durationSql;
+    final long plannedFillableRows;
+
+    BackfillWritePlan(String itemTypeName, String policyName, String currentPolicy,
+                      RootFingerprint rootFingerprint, PolicyFingerprint policyFingerprint,
+                      String durationSql, long plannedFillableRows) {
+        this.itemTypeName = itemTypeName;
+        this.policyName = policyName;
+        this.currentPolicy = currentPolicy;
+        this.rootFingerprint = rootFingerprint;
+        this.policyFingerprint = policyFingerprint;
+        this.durationSql = durationSql;
+        this.plannedFillableRows = plannedFillableRows;
+    }
+}
+
 final class BackfillResult {
     final int updatedRows;
     final long remainingRows;
@@ -380,5 +457,9 @@ final class BackfillResult {
     BackfillResult(int updatedRows, long remainingRows) {
         this.updatedRows = updatedRows;
         this.remainingRows = remainingRows;
+    }
+
+    boolean changedRows() {
+        return updatedRows > 0;
     }
 }

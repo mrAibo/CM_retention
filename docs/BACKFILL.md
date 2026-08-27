@@ -1,10 +1,10 @@
 # Existing-item backfill before policy assignment
 
-This document describes the explicit `--backfill` workflow in `cm-retention 0.3.4`.
+This document describes the explicit `--backfill` workflow in `cm-retention 0.3.5`.
 
 ## Purpose
 
-Assigning an expiration policy to an IBM Content Manager ItemType does not retroactively populate expiration metadata for already existing root rows. `--backfill` is the opt-in workflow for existing rows that do not yet have retention/auto-delete dates.
+Assigning an expiration policy to an IBM Content Manager ItemType does not retroactively populate expiration metadata for already existing root rows. `--backfill` is the explicit opt-in workflow for existing rows that do not yet have retention/auto-delete dates.
 
 Normal assignment:
 
@@ -24,6 +24,8 @@ Always start with:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 ```
 
+Since 0.3.5 the single-item workflow and `--file` workflow share the same guarded Java execution engine. A single-item backfill no longer launches separate JVMs for plan/apply/assign/verify.
+
 ## Correct SQL semantics
 
 For eligible rows the tool performs the equivalent of:
@@ -36,13 +38,7 @@ WHERE ICM$RETENTIONDATE IS NULL
   AND CREATETS IS NOT NULL;
 ```
 
-The creation timestamp column is:
-
-```text
-CREATETS
-```
-
-not `ICM$CREATETS`.
+The creation timestamp column is `CREATETS`, **not** `ICM$CREATETS`.
 
 For a one-year policy:
 
@@ -50,16 +46,7 @@ For a one-year policy:
 Formula : ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 ```
 
-The duration is read from the selected IBM CM policy and is not hard-coded.
-
-Examples:
-
-```text
-1 YEAR
-6 MONTHS
-52 WEEKS
-365 DAYS
-```
+The duration is read from the selected IBM CM policy and is not hard-coded. Supported DB2 duration forms include `1 YEAR`, `6 MONTHS`, `52 WEEKS` and `365 DAYS`.
 
 `ICM$RETENTIONDATE` remains NULL because this backfill supports only policies where retention itself is disabled and expiration/AUTO_DELETE is enabled.
 
@@ -79,17 +66,15 @@ Event-driven, retention-enabled, non-AUTO_DELETE and unsupported time-unit cases
 
 ## Root table resolution
 
-The user never supplies an `ICMUT...` table name.
-
-The tool resolves the root component from CM metadata using the ItemType ID and `PARENTCOMPTYPEID=0`, then derives:
+The user never supplies an `ICMUT...` table name. The tool resolves the root component from CM metadata using the ItemType ID and `PARENTCOMPTYPEID=0`, then derives:
 
 ```text
 ICMUT<COMPONENTTYPEID><SEGMENTID>
 ```
 
-The generated identifier is validated before use.
+The generated identifier is validated before use. Multi-segment cases continue to fail closed.
 
-## Dry-run output
+## Detailed dry-run plan
 
 Example:
 
@@ -117,7 +102,66 @@ Retention date already set: 0
 
 `Immediately expired after` is critical: those rows receive an auto-delete date already in the past and can become eligible for AUTO_DELETE after policy assignment.
 
-Since 0.3.4 these seven plan counters are calculated by one aggregate SELECT per root table instead of seven independent COUNT queries. This keeps the same output and safety checks while avoiding repeated full scans on large ItemTypes.
+The seven plan counters are calculated by **one aggregate SELECT per root table** rather than seven independent COUNT queries.
+
+## Phase-2 fast path
+
+0.3.5 deliberately separates the user-visible detailed plan from the final pre-write check.
+
+Phase 2 does **not** rebuild the full seven-counter plan and therefore does not repeat the expensive aggregate scan immediately before UPDATE. Instead it re-reads the critical metadata and performs only a fail-fast query for an eligible row with `NULL CREATETS`:
+
+```sql
+SELECT 1
+FROM ICMADMIN.<ROOT_TABLE>
+WHERE ICM$RETENTIONDATE IS NULL
+  AND ICM$AUTODELETEDATE IS NULL
+  AND CREATETS IS NULL
+FETCH FIRST 1 ROW ONLY;
+```
+
+If such a row exists, the backfill is refused before the UPDATE.
+
+## Policy fingerprint
+
+Phase 1 records an immutable fingerprint of the selected IBM CM policy:
+
+```text
+policy name
+retention type/enabled/period/unit
+expiration enabled/period/unit/action
+auto-delete schedule
+commit count
+max items
+max duration
+force check-in
+```
+
+The fingerprint is compared with freshly retrieved policy metadata:
+
+1. after validation and immediately before DB2 backfill;
+2. after DB2 COMMIT and immediately before policy assignment;
+3. during final verification.
+
+This prevents a policy with the same name but changed semantics from being assigned after existing rows were calculated with the old semantics.
+
+### Exit behavior for policy changes
+
+If the mismatch is detected **before** a relevant DB2 write, the command fails with exit `5` and performs no backfill mutation.
+
+If rows have already been committed to DB2 and the policy is then found changed, the workflow returns exit `6` and **does not assign the changed policy**. The committed backfill remains visible as an explicit partial-success state for review/recovery.
+
+## Root fingerprint
+
+Phase 1 also records:
+
+```text
+ItemTypeID
+ComponentTypeID
+SegmentID
+root ICMUT table name
+```
+
+The root identity is revalidated before UPDATE, after DB2 COMMIT before assignment, and during final verification. A changed root mapping is therefore never silently followed.
 
 ## Safety rules
 
@@ -126,35 +170,49 @@ Since 0.3.4 these seven plan counters are calculated by one aggregate SELECT per
 3. NULL `CREATETS` causes refusal before update.
 4. A different currently assigned policy causes refusal.
 5. Re-running the same backfill is idempotent for rows already updated.
-6. DB2 UPDATE is committed and verified before IBM CM policy assignment begins.
-7. If eligible NULL rows remain after the update, policy assignment does not start and exit code 6 is returned.
-8. After assignment, CM reconnect/persisted-state verification checks the actual ItemType state; final DB2 verification checks that no eligible NULL rows remain.
-9. Multi-segment cases currently fail closed rather than updating only one segment.
-10. If DB2 backfill completed but assignment/final verification is not clean, the overall command returns exit code 6.
-11. Batch mode checks the ItemType assignment and critical root/policy semantics again immediately before each write; a stale plan is refused.
+6. Policy and root fingerprints are frozen during Phase 1 and revalidated around the DB2/CM boundary.
+7. DB2 UPDATE is committed and residual NULL rows are verified before IBM CM policy assignment begins.
+8. If eligible NULL rows remain after the update, policy assignment does not start and exit `6` is returned.
+9. A policy/root change after a committed backfill blocks assignment and returns exit `6`.
+10. After assignment, a fresh CM session verifies the actual assignment and policy fingerprint; DB2 verification checks residual NULL rows and root identity.
+11. Multi-segment cases fail closed.
+12. Writes remain sequential; no parallel DB2 UPDATEs are introduced.
 
 ## Ordering and partial-success behavior
 
 ```text
-plan/count
+detailed plan + fingerprints
   -> confirm or dry-run
+  -> fresh ItemType/Policy/Root guard
+  -> cheap NULL-CREATETS preflight
   -> DB2 UPDATE
   -> DB2 COMMIT
   -> verify no eligible NULL rows remain
+  -> fresh post-COMMIT ItemType/Policy/Root guard
   -> IBM CM policy assignment
   -> reconnect/persisted-state verification
-  -> final DB2 + policy verification
+  -> final Policy/Root/assignment/DB2 verification
 ```
 
-DB2 backfill and IBM CM API assignment are not one distributed transaction. Therefore a failure after DB2 COMMIT can leave a committed backfill without a completed policy assignment.
-
-This is surfaced with exit code 6. Re-running the same `--backfill` command is the intended recovery path after reviewing the underlying cause.
+DB2 backfill and IBM CM API assignment are not one distributed transaction. Therefore a failure after DB2 COMMIT can leave a committed backfill without a completed policy assignment. This is surfaced with exit `6`; the tool does not hide the condition.
 
 ## Existing same policy
 
-If the ItemType already uses the requested policy, `--backfill` remains allowed as a recovery operation for residual NULL rows.
+If the ItemType already uses the requested policy, `--backfill` remains allowed as a recovery operation for residual NULL rows. If a different policy is assigned, backfill is refused.
 
-If a different policy is assigned, the backfill is refused.
+## Single-item runtime
+
+```bash
+bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
+bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
+```
+
+Both commands run one native Java workflow. Output includes plan and execution timings, e.g.:
+
+```text
+Plan timing                : 1.234 sec
+Timing                    : preflight ... / DB2 ... / post-commit guard ... / CM ... / verify ... / total ...
+```
 
 ## Batch backfill
 
@@ -167,37 +225,25 @@ INVOICE
 CONTRACT
 ```
 
-Dry-run:
-
 ```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
-```
-
-Interactive execution:
-
-```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill
-```
-
-Automation:
-
-```bash
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
 All ItemTypes are fully planned/validated before the first mutation. Actual execution remains sequential, fail-fast and non-atomic.
 
-### Batch performance model since 0.3.4
+### Batch performance model in 0.3.5
 
-The complete `--file` workflow runs in one JVM instead of launching separate Java processes for every ItemType and every backfill stage.
-
-For backfill batches:
-
-- one `BackfillService` instance reuses one DB2 JDBC connection across Phase 1 and Phase 2
-- each Phase-1 root table needs one aggregate statistics query instead of seven COUNT queries
-- final verification performs only the required assignment/root/NULL checks instead of rebuilding the complete statistics plan
-- CM validation is shared inside one JVM; after validation the CM session is deliberately discarded before the write phase
-- the existing reconnect-based persisted-state verification after each CM write remains enabled
+- one JVM for the complete file workflow
+- one Phase-1 bulk ItemType metadata load, then in-memory exact-name lookup
+- target policy resolved/fingerprinted once during validation
+- one `BackfillService` reuses one DB2 JDBC connection across Phase 1 and Phase 2
+- one aggregate statistics query per Phase-1 root table
+- no repeated full aggregate plan scan in Phase 2
+- validation CM session deliberately discarded before writes
+- reconnect-based persisted-state verification retained after CM writes
+- phase and per-ItemType timings are printed
 
 No parallel DB2 UPDATEs are used. Sequential writes are intentional to avoid multiplying transaction-log, I/O and lock pressure on large CM root tables.
 
@@ -231,14 +277,28 @@ DB2_JDBC_URL=jdbc:db2://dbhost.example:50000/LSDB
 
 The DB2 user needs SELECT access to the relevant CM metadata/root tables and UPDATE permission for the target root table.
 
+## Build/self-test
+
+`./build.sh` in 0.3.5 automatically runs the pure `SelfTestMain` before packaging. Among other checks it asserts that generated backfill SQL uses `CREATETS`, never `ICM$CREATETS`, and preserves the NULL guards.
+
+Manual test after build:
+
+```bash
+bin/cm-retention selftest
+```
+
+This does not log in to CM and does not connect to DB2.
+
 ## Recommended production procedure
 
-1. Run `status` against the intended environment.
-2. Inspect the target policy.
-3. Run the exact `--backfill --dry-run` command.
-4. Review root table, `CREATETS` formula, eligible count and immediately-expired count.
-5. Ensure backup/change controls are in place.
-6. Run the real command.
-7. Check the return code.
-8. Re-run the dry-run and inspect the ItemType/policy.
-9. Review IBM CM/DB2 logs if exit code 6 or another warning occurred.
+1. Run `bin/cm-retention selftest` after deployment.
+2. Run `status` against the intended environment.
+3. Inspect the target policy with `policy POLICY`.
+4. Run the exact `--backfill --dry-run` command.
+5. Review root table, `CREATETS` formula, eligible count and immediately-expired count.
+6. Review reported Phase-1 timing on large ItemTypes.
+7. Ensure backup/change controls are in place.
+8. Run the real command.
+9. Check the return code; treat `6` as a possible persisted/partial-success condition.
+10. Re-run dry-run/status checks and inspect ItemType/policy.
+11. Review IBM CM/DB2 logs if exit `6` or another warning occurred.

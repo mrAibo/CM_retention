@@ -12,15 +12,10 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
-/**
- * Native batch runtime for --file assign/unassign workflows.
- *
- * The launcher starts this class once for the complete batch. Phase 1 validates
- * every ItemType before any mutation. Phase 2 remains sequential and fail-fast
- * so the existing operational safety model is preserved.
- */
+/** Native single-JVM runtime for --file assign/unassign workflows. */
 public final class BatchMain {
     private BatchMain() { }
 
@@ -28,6 +23,7 @@ public final class BatchMain {
         int rc = 0;
         CmService cm = null;
         BackfillService backfill = null;
+        long totalStarted = Timing.start();
         try {
             BatchOptions options = BatchOptions.parse(args);
             List<String> itemTypes = readItemTypes(options.file);
@@ -39,11 +35,15 @@ public final class BatchMain {
             }
 
             printHeader(options, itemTypes.size());
+            long phase1Started = Timing.start();
             List<BatchEntry> entries = validateAll(cm, backfill, options, itemTypes);
+            long phase1Nanos = Timing.elapsed(phase1Started);
             System.out.println("Validation: OK (" + entries.size() + " item types)");
+            System.out.println("Phase 1 timing: " + Timing.format(phase1Nanos));
 
             if (options.dryRun) {
                 System.out.println("DRY RUN: batch validation complete. No changes made.");
+                System.out.println("Total timing  : " + Timing.since(totalStarted));
                 return;
             }
 
@@ -51,33 +51,41 @@ public final class BatchMain {
             System.out.println("NOTE: batch execution is sequential, not atomic.");
             System.out.println("If a runtime error occurs, processing stops immediately, but earlier successful changes remain committed.");
             if (options.backfill) {
-                System.out.println("Each ItemType is processed as: DB2 backfill -> verify -> policy assignment -> final verify.");
+                System.out.println("Each ItemType is processed as: guarded DB2 backfill -> policy fingerprint guard -> assignment -> final verify.");
             }
 
             if (!approve(options, entries.size())) {
                 System.out.println("Cancelled. No changes made.");
+                System.out.println("Total timing: " + Timing.since(totalStarted));
                 return;
             }
 
-            // Discard any metadata cached during the potentially long validation
-            // phase. Each write still performs CmService's persisted-state
-            // reconnect verification after commit.
+            // Discard CM metadata cached during the potentially long validation
+            // phase. The DB2 BackfillService remains open and reuses its one
+            // connection across both phases.
             cm.closeQuietly();
 
             System.out.println();
             System.out.println("Phase 2/2: applying changes");
             System.out.println();
 
+            long phase2Started = Timing.start();
             int completed = 0;
             for (int i = 0; i < entries.size(); i++) {
                 BatchEntry entry = entries.get(i);
+                long itemStarted = Timing.start();
                 System.out.println("--- [" + (i + 1) + "/" + entries.size() + "] " + entry.itemTypeName + " ---");
                 try {
                     if (options.command == BatchCommand.ASSIGN) {
                         if (options.backfill) {
-                            applyBackfillAssignment(cm, backfill, entry, options.policyName);
+                            BackfillWorkflow.apply(cm, backfill, entry.backfill);
                         } else {
-                            cm.assignPolicy(entry.itemTypeName, options.policyName, entry.expectedPolicy);
+                            cm.assignPolicy(
+                                    entry.itemTypeName,
+                                    options.policyName,
+                                    entry.expectedPolicy,
+                                    entry.targetPolicyFingerprint,
+                                    5);
                             System.out.println("Assigned: " + entry.itemTypeName + " -> " + options.policyName);
                         }
                     } else {
@@ -91,12 +99,17 @@ public final class BatchMain {
                             + completed + " fully verified item(s).");
                     System.err.println("Earlier successful changes remain committed; review current state before retrying.");
                     throw e;
+                } finally {
+                    System.out.println("Item timing: " + Timing.since(itemStarted));
                 }
                 System.out.println();
             }
 
+            long phase2Nanos = Timing.elapsed(phase2Started);
             System.out.println("Batch complete: " + completed + "/" + entries.size()
                     + " item types processed successfully.");
+            System.out.println("Phase 2 timing: " + Timing.format(phase2Nanos));
+            System.out.println("Total timing  : " + Timing.since(totalStarted));
         } catch (CliException e) {
             System.err.println("ERROR: " + e.getMessage());
             rc = e.exitCode;
@@ -126,10 +139,15 @@ public final class BatchMain {
                                                  BatchOptions options,
                                                  List<String> itemTypes) throws Exception {
         DKRetentionPolicyDefICM targetPolicy = null;
+        PolicyFingerprint targetFingerprint = null;
         if (options.command == BatchCommand.ASSIGN) {
-            // Resolve once for Phase 1 instead of once per ItemType/JVM.
-            targetPolicy = cm.requirePolicy(options.policyName);
+            targetPolicy = cm.requirePolicyFresh(options.policyName);
+            targetFingerprint = PolicyFingerprint.from(targetPolicy);
         }
+
+        // One CM metadata collection for Phase 1 replaces one retrieveEntity()
+        // round-trip per input line. Writes still re-read each ItemType freshly.
+        Map<String, DKItemTypeDefICM> itemTypeMap = cm.itemTypesByName();
 
         System.out.println("Phase 1/2: validating every item type (no changes)");
         System.out.println();
@@ -139,116 +157,31 @@ public final class BatchMain {
             String itemTypeName = itemTypes.get(i);
             System.out.println("--- [" + (i + 1) + "/" + itemTypes.size() + "] " + itemTypeName + " ---");
 
-            DKItemTypeDefICM itemType = cm.requireItemType(itemTypeName);
+            DKItemTypeDefICM itemType = itemTypeMap.get(itemTypeName);
+            if (itemType == null) {
+                throw new CliException("Itemtype not found: " + itemTypeName, 4);
+            }
             String current = CmService.normalizePolicy(itemType.getItemTypeRetentionPolicyName());
-            BackfillPlan backfillPlan = null;
 
             if (options.command == BatchCommand.ASSIGN) {
                 if (options.backfill) {
-                    backfillPlan = backfill.plan(itemType, targetPolicy, current, options.policyName);
-                    BackfillMain.printPlan(backfillPlan);
-                    BackfillMain.validatePlan(backfillPlan);
+                    ValidatedBackfill validated = BackfillWorkflow.validate(
+                            backfill, itemType, targetPolicy, options.policyName);
+                    BackfillMain.printPlan(validated.plan);
+                    entries.add(new BatchEntry(
+                            itemTypeName, current, validated, targetFingerprint));
                 } else {
                     printAssignPlan(itemTypeName, current, options.policyName, targetPolicy);
+                    entries.add(new BatchEntry(
+                            itemTypeName, current, null, targetFingerprint));
                 }
             } else {
                 printUnassignPlan(itemTypeName, current);
+                entries.add(new BatchEntry(itemTypeName, current, null, null));
             }
-
-            entries.add(new BatchEntry(itemTypeName, current, backfillPlan));
             System.out.println();
         }
         return entries;
-    }
-
-    private static void applyBackfillAssignment(CmService cm,
-                                                BackfillService backfill,
-                                                BatchEntry entry,
-                                                String policyName) throws Exception {
-        // Re-read immediately before the write. This keeps the stale-plan guard
-        // even though the entire batch now runs in one JVM.
-        DKItemTypeDefICM itemType = cm.requireItemType(entry.itemTypeName);
-        String current = CmService.normalizePolicy(itemType.getItemTypeRetentionPolicyName());
-        if (!samePolicy(current, entry.expectedPolicy)) {
-            throw new CliException("State changed after batch validation: " + entry.itemTypeName
-                    + " now uses " + CmService.emptyAsDash(current)
-                    + " instead of " + CmService.emptyAsDash(entry.expectedPolicy)
-                    + ". Re-run the batch.", 5);
-        }
-
-        DKRetentionPolicyDefICM policy = cm.requirePolicy(policyName);
-        BackfillPlan currentPlan = backfill.plan(itemType, policy, current, policyName);
-        BackfillMain.validatePlan(currentPlan);
-        validateBackfillSemanticsUnchanged(entry.backfillPlan, currentPlan);
-
-        BackfillMain.printApplyHeader(currentPlan);
-        BackfillResult result = backfill.apply(currentPlan);
-        System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
-        System.out.println("Remaining NULL rows: " + result.remainingRows);
-
-        Exception assignmentProblem = null;
-        try {
-            cm.assignPolicy(entry.itemTypeName, policyName, current);
-        } catch (Exception e) {
-            assignmentProblem = e;
-            printEmbeddedProblem("Policy assignment", e);
-        }
-
-        Exception verificationProblem = null;
-        try {
-            DKItemTypeDefICM freshItem = cm.requireItemType(entry.itemTypeName);
-            DKRetentionPolicyDefICM freshPolicy = cm.requirePolicy(policyName);
-            String persisted = CmService.normalizePolicy(freshItem.getItemTypeRetentionPolicyName());
-            long remaining = backfill.remainingMissing(freshItem, freshPolicy, persisted, policyName);
-            if (remaining != 0) {
-                throw new CliException("Backfill verification failed: " + remaining
-                        + " row(s) still have NULL retention/auto-delete metadata.", 6);
-            }
-            BackfillMain.printVerificationOk(entry.itemTypeName, policyName);
-        } catch (Exception e) {
-            verificationProblem = e;
-            printEmbeddedProblem("Final verification", e);
-        }
-
-        if (assignmentProblem != null || verificationProblem != null) {
-            throw new CliException("Backfill phase completed for " + entry.itemTypeName
-                    + ", but assignment/final verification was not a clean success."
-                    + " Review the ItemType and DB2 state before retrying.", 6);
-        }
-    }
-
-    private static void validateBackfillSemanticsUnchanged(BackfillPlan validated,
-                                                            BackfillPlan current) {
-        if (validated == null) {
-            throw new CliException("Internal batch error: missing validated backfill plan", 2);
-        }
-        boolean same = validated.itemTypeId == current.itemTypeId
-                && validated.componentTypeId == current.componentTypeId
-                && validated.segmentId == current.segmentId
-                && validated.tableName.equals(current.tableName)
-                && validated.expirationAmount == current.expirationAmount
-                && validated.expirationUnit.equals(current.expirationUnit)
-                && validated.durationSql.equals(current.durationSql);
-        if (!same) {
-            throw new CliException("Backfill metadata or policy semantics changed after batch validation for "
-                    + current.itemTypeName + ". Re-run the batch and review the new plan.", 5);
-        }
-    }
-
-    private static void printEmbeddedProblem(String stage, Exception e) {
-        if (e instanceof OperationWarning) {
-            OperationWarning warning = (OperationWarning) e;
-            System.err.println("WARNING: " + stage + ": " + warning.getMessage());
-            BackfillMain.printDkException(warning.cause);
-        } else if (e instanceof DKException) {
-            System.err.println("ERROR: " + stage + " failed");
-            BackfillMain.printDkException((DKException) e);
-        } else if (e instanceof SQLException) {
-            System.err.println("ERROR: " + stage + " failed");
-            BackfillMain.printSqlException((SQLException) e);
-        } else {
-            System.err.println("ERROR: " + stage + ": " + BackfillMain.safeMessage(e));
-        }
     }
 
     private static void printAssignPlan(String itemTypeName,
@@ -333,12 +266,6 @@ public final class BatchMain {
         return result;
     }
 
-    private static boolean samePolicy(String left, String right) {
-        String a = CmService.normalizePolicy(left);
-        String b = CmService.normalizePolicy(right);
-        return a == null ? b == null : a.equals(b);
-    }
-
     private enum BatchCommand {
         ASSIGN("assign"),
         UNASSIGN("unassign");
@@ -353,12 +280,17 @@ public final class BatchMain {
     private static final class BatchEntry {
         final String itemTypeName;
         final String expectedPolicy;
-        final BackfillPlan backfillPlan;
+        final ValidatedBackfill backfill;
+        final PolicyFingerprint targetPolicyFingerprint;
 
-        BatchEntry(String itemTypeName, String expectedPolicy, BackfillPlan backfillPlan) {
+        BatchEntry(String itemTypeName,
+                   String expectedPolicy,
+                   ValidatedBackfill backfill,
+                   PolicyFingerprint targetPolicyFingerprint) {
             this.itemTypeName = itemTypeName;
             this.expectedPolicy = expectedPolicy;
-            this.backfillPlan = backfillPlan;
+            this.backfill = backfill;
+            this.targetPolicyFingerprint = targetPolicyFingerprint;
         }
     }
 
