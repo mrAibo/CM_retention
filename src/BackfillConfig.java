@@ -33,28 +33,19 @@ final class BackfillConfig {
         if (requestedType != null && "auto".equalsIgnoreCase(requestedType)) {
             requestedType = null;
         }
-
-        String jdbcUrl = firstConfigured(values,
-                "BACKFILL_JDBC_URL",
-                "ORACLE_JDBC_URL",
-                "DB2_JDBC_URL");
-
-        if (jdbcUrl == null) {
-            if (requestedType != null && "oracle".equalsIgnoreCase(requestedType)) {
-                throw new CliException("Oracle backfill requires BACKFILL_JDBC_URL"
-                        + " (for example jdbc:oracle:thin:@//host:1521/service)", 2);
-            }
-            String dbName = firstConfigured(values, "BACKFILL_DATABASE", "DB2_DATABASE");
-            if (dbName == null) dbName = base.database;
-            jdbcUrl = "jdbc:db2:" + dbName;
+        if (requestedType != null) {
+            // Validate the configured value before using it to choose aliases.
+            BackfillDialects.forType(requestedType);
+            requestedType = requestedType.toLowerCase(Locale.ROOT);
         }
 
+        String jdbcUrl = resolveJdbcUrl(base, values, requestedType);
         String detectedType = BackfillDialects.detectType(jdbcUrl);
         if (detectedType == null) {
             throw new CliException("Unsupported backfill JDBC URL: " + jdbcUrl
                     + " (expected jdbc:db2:... or jdbc:oracle:...)", 2);
         }
-        if (requestedType != null && !requestedType.equalsIgnoreCase(detectedType)) {
+        if (requestedType != null && !requestedType.equals(detectedType)) {
             throw new CliException("BACKFILL_DB_TYPE=" + requestedType
                     + " conflicts with JDBC URL " + jdbcUrl, 2);
         }
@@ -89,6 +80,48 @@ final class BackfillConfig {
         }
 
         return new BackfillConfig(jdbcUrl, user, password, schema, dialect);
+    }
+
+    private static String resolveJdbcUrl(Config base,
+                                         Map<String, String> values,
+                                         String requestedType) {
+        String neutralUrl = configuredValue("BACKFILL_JDBC_URL", values);
+        if (neutralUrl != null) return neutralUrl;
+
+        if ("oracle".equals(requestedType)) {
+            String oracleUrl = configuredValue("ORACLE_JDBC_URL", values);
+            if (oracleUrl != null) return oracleUrl;
+            throw new CliException("Oracle backfill requires BACKFILL_JDBC_URL"
+                    + " (or legacy ORACLE_JDBC_URL), for example"
+                    + " jdbc:oracle:thin:@//host:1521/service", 2);
+        }
+
+        if ("db2".equals(requestedType)) {
+            String db2Url = configuredValue("DB2_JDBC_URL", values);
+            if (db2Url != null) return db2Url;
+            return defaultDb2Url(base, values);
+        }
+
+        // Auto mode: accept exactly one legacy database-specific URL. If both
+        // are present, refuse ambiguity instead of silently preferring one.
+        String oracleUrl = configuredValue("ORACLE_JDBC_URL", values);
+        String db2Url = configuredValue("DB2_JDBC_URL", values);
+        if (oracleUrl != null && db2Url != null) {
+            throw new CliException("Both ORACLE_JDBC_URL and DB2_JDBC_URL are configured."
+                    + " Set BACKFILL_JDBC_URL or BACKFILL_DB_TYPE explicitly.", 2);
+        }
+        if (oracleUrl != null) return oracleUrl;
+        if (db2Url != null) return db2Url;
+
+        // Preserve the pre-0.4.0 behavior for existing DB2 deployments that do
+        // not define any direct-database override at all.
+        return defaultDb2Url(base, values);
+    }
+
+    private static String defaultDb2Url(Config base, Map<String, String> values) {
+        String dbName = firstConfigured(values, "BACKFILL_DATABASE", "DB2_DATABASE");
+        if (dbName == null) dbName = base.database;
+        return "jdbc:db2:" + dbName;
     }
 
     private static Map<String, String> load(Config base) throws IOException {
