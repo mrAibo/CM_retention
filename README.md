@@ -8,26 +8,31 @@ The project intentionally stays narrow: Java 8, the IBM CM SDK already installed
 
 ## Database support
 
-Normal commands use the IBM CM SDK and are database-independent from the tool's perspective:
+The IBM CM SDK operations work with both DB2- and Oracle-backed Library Servers. The explicit direct-database `--backfill` workflow supports both database families as well.
+
+| Library Server database | Read/assign/unassign | Policy create/delete | `--backfill` |
+|---|---:|---:|---:|
+| DB2 | yes | yes | yes |
+| Oracle 19c | yes | yes | yes |
+
+There is one important database-specific detail for **policy creation**: IBM CM uses different automatic-delete schedule syntax depending on the Library Server database:
+
+- **DB2:** UNIX cron, for example `0 2 * * *`
+- **Oracle:** Oracle calendaring syntax, for example `FREQ=DAILY;BYHOUR=2;BYMINUTE=0;BYSECOND=0;`
+
+For that reason the repository contains ready-to-use variants for both platforms:
 
 ```text
-status / doctor
-policies / policy
-itemtypes / itemtype
-create
-delete
-assign / unassign
---file without --backfill
+profiles/auto-delete-1y.properties
+profiles/auto-delete-5y.properties
+profiles/auto-delete-10y.properties
+
+profiles/auto-delete-1y-oracle.properties
+profiles/auto-delete-5y-oracle.properties
+profiles/auto-delete-10y-oracle.properties
 ```
 
-The explicit direct-database `--backfill` workflow supports:
-
-| Library Server database | Normal CM commands | `--backfill` |
-|---|---:|---:|
-| DB2 | yes | yes |
-| Oracle 19c | yes | yes |
-
-IBM Content Manager 8.7 supports Oracle 19c and requires `ojdbc8.jar` for Oracle Java API/database connectivity.
+The expiration/retention semantics are identical; only the automatic-delete schedule string differs. Do not use a DB2 cron schedule on an Oracle Library Server or an Oracle calendaring expression on DB2.
 
 ## Main capabilities
 
@@ -35,15 +40,15 @@ IBM Content Manager 8.7 supports Oracle 19c and requires `ojdbc8.jar` for Oracle
 - list and inspect ItemTypes
 - create fixed-time `AUTO_DELETE` policies
 - create policies from reusable `.properties` templates
-- assign/unassign one or many ItemTypes
-- `--dry-run` and conservative confirmation for writes
-- single-JVM `--file` batch runtime
+- assign and unassign policies
+- process many ItemTypes with `--file` in one JVM
+- preview writes with `--dry-run`
 - guarded existing-item `--backfill` before assignment
-- DB2 and Oracle backfill SQL dialects
+- direct backfill against DB2 or Oracle
 - Policy/Root fingerprints around database/CM transaction boundaries
-- phase/item timings
+- phase and ItemType timings
 - pure `selftest` regression checks
-- runtime tarball for hosts without Git/javac
+- runtime tarball for hosts without Git or `javac`
 
 The tool does **not** call `deleteExpiredItems()` and does not directly delete documents.
 
@@ -80,14 +85,14 @@ cm-retention assign --file ITEMTYPES.txt POLICY --backfill
 
 Run without arguments in a terminal for the small interactive admin menu.
 
-## Policy usage
+## Inspecting policy usage
 
 ```bash
 bin/cm-retention policies
 bin/cm-retention policy AUTO_DELETE_5Y
 ```
 
-`policies` shows the assigned ItemType count. `policy POLICY` also lists the exact assigned ItemTypes:
+`policies` shows the number of assigned ItemTypes. `policy POLICY` also lists the exact ItemTypes:
 
 ```text
 Assigned itemtypes:         3
@@ -102,7 +107,7 @@ Assigned itemtypes:         3
 
 # Policy templates
 
-A complete supported template looks like:
+A policy template contains the policy semantics and automatic-delete settings:
 
 ```properties
 RET_POLICY_NAME=AUTO_DELETE_1Y
@@ -121,27 +126,39 @@ auto-delete.max-duration=120
 auto-delete.force-checkin=true
 ```
 
-`auto-delete.max-duration=120` means **120 seconds**.
+`auto-delete.max-duration=120` means **120 seconds**, not 120 minutes.
 
-Included templates:
-
-```text
-ret-policy.properties
-profiles/auto-delete-1y.properties
-profiles/auto-delete-5y.properties
-profiles/auto-delete-10y.properties
-```
-
-Recommended syntax:
+## DB2 create example
 
 ```bash
 bin/cm-retention create profiles/auto-delete-5y.properties --dry-run
 bin/cm-retention create profiles/auto-delete-5y.properties
 ```
 
-A readable `.properties` file is detected automatically when it is the only positional create argument. Explicit `--properties FILE` remains supported and is required when positional POLICY/AGE overrides are used.
+The DB2 templates use cron syntax:
 
-Precedence:
+```properties
+auto-delete.schedule=0 2 * * *
+```
+
+## Oracle create example
+
+```bash
+bin/cm-retention create profiles/auto-delete-5y-oracle.properties --dry-run
+bin/cm-retention create profiles/auto-delete-5y-oracle.properties
+```
+
+The Oracle templates use Oracle calendaring syntax:
+
+```properties
+auto-delete.schedule=FREQ=DAILY;BYHOUR=2;BYMINUTE=0;BYSECOND=0;
+```
+
+An explicit CLI schedule still overrides the template, but the supplied value must use the syntax required by the target Library Server database.
+
+A readable `.properties` file is automatically recognized when it is the only positional `create` argument. Explicit `--properties FILE` remains supported and is required when positional POLICY/AGE overrides are used.
+
+Precedence remains:
 
 ```text
 explicit CLI POLICY / AGE / options
@@ -149,6 +166,8 @@ explicit CLI POLICY / AGE / options
         > default ret-policy.properties
         > built-in fallback
 ```
+
+The root `ret-policy.properties` and the non-suffixed profiles remain DB2-oriented for backward compatibility. On Oracle, select one of the `*-oracle.properties` templates or provide an Oracle schedule explicitly.
 
 ---
 
@@ -161,13 +180,13 @@ IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 ```
 
-Build on a compatible CM host:
+Build on a compatible CM 8.7 host:
 
 ```bash
 ./build.sh
 ```
 
-The build compiles all Java sources and runs `SelfTestMain` before creating artifacts. The self-test loads the SDK classes but does **not** log in to CM and does **not** open a DB2/Oracle JDBC connection.
+The build compiles all Java sources and runs `SelfTestMain` before creating artifacts. The self-test loads IBM CM SDK classes but does **not** log in to Content Manager and does **not** open a DB2/Oracle JDBC connection.
 
 Version 0.4.0 produces:
 
@@ -176,7 +195,7 @@ build/cm-retention.jar
 build/cm-retention-0.4.0.jar
 build/.version
 build/ret-policy.properties
-build/profiles/...
+build/profiles/*.properties
 build/cm-retention-0.4.0-runtime.tar.gz
 build/SHA256SUMS-0.4.0
 ```
@@ -214,16 +233,21 @@ Normal assignment does not retroactively populate expiration metadata for existi
 
 # Existing-item backfill
 
-IBM documents that applying a retention policy to an existing ItemType affects new items/new versions; existing items require SQL or a custom API procedure to populate `ICM$RETENTIONDATE` / `ICM$AUTODELETEDATE` metadata.
+IBM documents that applying a system-controlled retention policy to an existing ItemType does not retroactively populate the policy metadata for existing items. `--backfill` is the explicit opt-in for this migration.
 
-Use the explicit opt-in:
+Always start read-only:
 
 ```bash
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
+```
+
+Real execution:
+
+```bash
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
 ```
 
-The logical update remains:
+The logical update is:
 
 ```sql
 UPDATE <SCHEMA>.<ICMUT_TABLE>
@@ -235,15 +259,19 @@ WHERE ICM$RETENTIONDATE IS NULL
 
 The physical creation timestamp column is `CREATETS`, not `ICM$CREATETS`.
 
-## DB2 formula
+## DB2 backfill SQL
+
+A one-year policy is generated as:
 
 ```text
 ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 ```
 
-DB2 uses `CURRENT TIMESTAMP` and `FETCH FIRST 1 ROW ONLY` in the relevant plan/preflight queries.
+DB2 uses `CURRENT TIMESTAMP` for the immediate-expiration plan calculation and `FETCH FIRST 1 ROW ONLY` for the fail-fast probe.
 
-## Oracle formula
+## Oracle backfill SQL
+
+A one-year policy is generated as:
 
 ```text
 ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
@@ -258,9 +286,9 @@ WEEK  -> NUMTODSINTERVAL(N*7, 'DAY')
 DAY   -> NUMTODSINTERVAL(N, 'DAY')
 ```
 
-The Oracle plan uses `CURRENT_TIMESTAMP`; the fail-fast one-row probe uses `ROWNUM = 1`.
+The Oracle plan uses `CURRENT_TIMESTAMP`; its one-row fail-fast probe uses `ROWNUM = 1`.
 
-## Safety
+## Backfill safety
 
 Backfill accepts only:
 
@@ -274,18 +302,18 @@ positive YEAR/MONTH/WEEK/DAY period
 
 It also:
 
-- never overwrites existing retention/auto-delete dates
+- never overwrites an existing `ICM$RETENTIONDATE` or `ICM$AUTODELETEDATE`
 - refuses eligible rows with NULL `CREATETS`
 - refuses a different already-assigned policy
-- derives and validates the physical `ICMUT...` root table automatically
+- resolves the physical root table from CM metadata rather than CLI input
 - rejects unsupported multi-segment roots
 - fingerprints Policy and root metadata
 - revalidates before UPDATE, after database COMMIT, and during final verification
-- verifies residual NULL rows before starting policy assignment
-- returns exit `6` for persisted/partial-success states after a relevant COMMIT
+- verifies residual NULL rows before policy assignment
+- returns exit `6` for persisted/partial-success conditions after a relevant COMMIT
 - keeps batch writes sequential and fail-fast
 
-The database UPDATE and IBM CM API assignment are not one distributed transaction.
+The direct database UPDATE and IBM CM API assignment are **not one distributed transaction**.
 
 Detailed procedure: [docs/BACKFILL.md](docs/BACKFILL.md).
 
@@ -295,7 +323,7 @@ Detailed procedure: [docs/BACKFILL.md](docs/BACKFILL.md).
 
 Normal non-backfill commands do not require these settings.
 
-## Preferred neutral DB2 configuration
+## Preferred DB2 configuration
 
 ```dotenv
 BACKFILL_DB_TYPE=db2
@@ -306,7 +334,13 @@ BACKFILL_SCHEMA=ICMADMIN
 BACKFILL_JDBC_JAR=/opt/IBM/db2/V11.5/java/db2jcc4.jar
 ```
 
-Existing `DB2_*` settings remain backward compatible. With no `BACKFILL_*`/DB2 override at all, the legacy default remains:
+A network URL can also be used:
+
+```dotenv
+BACKFILL_JDBC_URL=jdbc:db2://dbhost.example:50000/LSDB
+```
+
+Existing `DB2_*` settings remain backward compatible. With no `BACKFILL_*`/DB2 override, the historical default remains:
 
 ```text
 jdbc:db2:<CM_DATABASE>
@@ -326,15 +360,17 @@ BACKFILL_JDBC_JAR=/u01/app/oracle/product/19.0.0/dbhome_1/jdbc/lib/ojdbc8.jar
 
 Oracle requires an explicit JDBC URL. The tool deliberately does not infer listener/service information from `CM_DATABASE`.
 
-`BACKFILL_DB_TYPE=auto` (or omitting it) detects DB2/Oracle from the JDBC prefix. A configured type/URL mismatch is rejected.
+`BACKFILL_DB_TYPE=auto` (or omitting it when a URL is supplied) detects DB2/Oracle from the JDBC prefix. A configured type/URL mismatch is rejected.
 
-Oracle aliases `ORACLE_JDBC_URL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`, `ORACLE_JDBC_JAR` are accepted, but `BACKFILL_*` is preferred.
+Oracle aliases `ORACLE_JDBC_URL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`, and `ORACLE_JDBC_JAR` are accepted, but `BACKFILL_*` is preferred.
 
-The launcher can locate `ojdbc8.jar` under `$ORACLE_HOME/jdbc/lib` or common IBM/WAS locations. Explicit `BACKFILL_JDBC_JAR` is the most deterministic configuration.
+The launcher can locate `ojdbc8.jar` under `$ORACLE_HOME/jdbc/lib` or common IBM/WAS locations. An explicit `BACKFILL_JDBC_JAR` is the most deterministic production configuration.
 
 ---
 
 # Batch mode
+
+Example file:
 
 ```text
 # itemtypes.txt
@@ -349,9 +385,9 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-The complete file workflow runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates all ItemTypes before the first mutation. Phase 2 remains sequential, fail-fast, and non-atomic.
+The complete file workflow runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates every ItemType before the first mutation. Phase 2 remains sequential, fail-fast, and non-atomic.
 
-The backfill batch header reports the selected database:
+The backfill batch header reports the selected database, for example:
 
 ```text
 Batch mode (native Java runtime)
