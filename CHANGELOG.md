@@ -2,6 +2,23 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.4.4
+
+Inline-batch convenience and concurrent-write backfill hardening after production validation on an active multi-million-row ItemType:
+
+- `assign ITEM1,ITEM2,... POLICY` and `unassign ITEM1,ITEM2,...` are now accepted as compact batch shortcuts
+- comma-list syntax is normalized by the launcher into the existing native `--file` batch workflow rather than creating a second mutation implementation
+- comma-list batches therefore keep the same Phase-1 validation, sequential/fail-fast writes, verified-warning handling, audit log, independent Phase-3 verifier, retry file, and `--backfill` semantics
+- temporary inline-batch files are created with restrictive permissions and removed automatically; the audit log retains both the original command and normalized batch command
+- DB2 `--backfill` now always uses the bounded executor, including small/resume runs, so a retry after a previously large partial backfill receives the same residual-row catch-up protection
+- after the first short DB2 chunk, residual rows are re-counted and up to 20 bounded catch-up passes handle rows created concurrently while the policy is still unassigned
+- policy assignment still does not start until the pre-assignment residual count reaches zero; continuous write pressure or non-backfillable `CREATETS=NULL` rows remain fail-closed with exit `6`
+- after policy assignment, final verification now performs one last guarded catch-up if rows appeared during the final pre-assign/assign window, then re-verifies the persisted policy and residual count
+- Phase 3 for `--backfill` now verifies both the exact target policy and the direct-database residual state; an ItemType with the policy assigned but remaining NULL retention/auto-delete metadata is no longer counted as `Verified OK`
+- Phase-3 backfill verification uses an existence probe first and performs a full COUNT only when a residual mismatch actually exists
+- self-test covers DB2 catch-up sizing in addition to existing chunk syntax / SQL0964C detection
+- bumped runtime/package version to `0.4.4`
+
 ## 0.4.3
 
 Large-DB2-backfill and verifier-classification hardening after the first production run against multi-million-row ItemTypes:
