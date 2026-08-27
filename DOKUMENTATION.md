@@ -235,20 +235,30 @@ Für die Plan-Berechnung wird `CURRENT TIMESTAMP` verwendet. Der fail-fast Probe
 
 ### 7.2 Oracle-Dialekt
 
-Beispiel ein Jahr:
+Der Oracle-Dialekt verwendet Interval-Literale. Beispiel ein Jahr:
 
 ```text
-ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
+ICM$AUTODELETEDATE = CREATETS + INTERVAL '1' YEAR
 ```
 
 Generierung:
 
 ```text
-YEAR  -> NUMTOYMINTERVAL(N, 'YEAR')
-MONTH -> NUMTOYMINTERVAL(N, 'MONTH')
-WEEK  -> NUMTODSINTERVAL(N*7, 'DAY')
-DAY   -> NUMTODSINTERVAL(N, 'DAY')
+YEAR  -> INTERVAL 'N' YEAR
+MONTH -> INTERVAL 'N' MONTH
+WEEK  -> INTERVAL 'N*7' DAY
+DAY   -> INTERVAL 'N' DAY
 ```
+
+Bei mehr als zwei führenden Stellen wird die erforderliche Oracle-Precision explizit ergänzt:
+
+```text
+300 Monate -> INTERVAL '300' MONTH(3)
+52 Wochen  -> INTERVAL '364' DAY(3)
+365 Tage   -> INTERVAL '365' DAY(3)
+```
+
+Oracle-Intervalle mit mehr als neun führenden Stellen werden fail-closed abgelehnt.
 
 Für die Plan-Berechnung wird `CURRENT_TIMESTAMP` verwendet. Der fail-fast Probe nutzt `ROWNUM = 1`.
 
@@ -340,7 +350,7 @@ Direkter DB-Backfill und IBM-CM-Assignment sind keine verteilte gemeinsame Trans
 
 ## 8. Backfill-Konfiguration
 
-Normale Non-Backfill-Befehle benötigen diese Werte nicht.
+Normale Non-Backfill-Befehle benötigen diese Werte nicht. Ein fehlerhaft konfigurierter direct-JDBC-Pfad blockiert `--backfill` bzw. wird durch `doctor` angezeigt, aber blockiert keine normalen CM-SDK-Kommandos.
 
 ### 8.1 Bevorzugte neutrale DB2-Konfiguration
 
@@ -379,7 +389,7 @@ BACKFILL_JDBC_JAR=/u01/app/oracle/product/19.0.0/dbhome_1/jdbc/lib/ojdbc8.jar
 
 Für Oracle ist ein expliziter JDBC-URL erforderlich. Listener/Service werden **nicht** aus `CM_DATABASE` geraten.
 
-Der Launcher sucht `ojdbc8.jar` unter anderem unter `$ORACLE_HOME/jdbc/lib` und in bekannten IBM/WAS-Pfaden. Ein explizites `BACKFILL_JDBC_JAR` ist für Produktion am eindeutigsten.
+`ORACLE_HOME` wird auch aus `.env` gelesen. Der Launcher sucht `ojdbc8.jar` unter anderem unter `$ORACLE_HOME/jdbc/lib` und in bekannten IBM/WAS-Pfaden. Ein explizites `BACKFILL_JDBC_JAR` ist für Produktion am eindeutigsten.
 
 Auch folgende Oracle-Aliase werden akzeptiert:
 
@@ -406,7 +416,7 @@ jdbc:db2:...     -> DB2
 jdbc:oracle:...  -> Oracle
 ```
 
-Ein Widerspruch zwischen fest gesetztem Typ und URL wird mit Exit `2` abgelehnt.
+Ein Widerspruch zwischen fest gesetztem Typ und URL wird mit Exit `2` abgelehnt. Sind in Auto-Mode gleichzeitig `DB2_JDBC_URL` und `ORACLE_JDBC_URL` gesetzt, wird die Mehrdeutigkeit ebenfalls abgelehnt.
 
 ## 9. Batch mit `--file`
 
