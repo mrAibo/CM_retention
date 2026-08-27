@@ -4,7 +4,7 @@ This document describes the explicit `--backfill` workflow in `cm-retention 0.4.
 
 ## Purpose
 
-Applying a system-controlled retention/expiration policy to an existing IBM Content Manager ItemType does not retroactively populate retention/expiration metadata for existing items. IBM documents that existing items require SQL or a custom API procedure. `--backfill` is the explicit opt-in workflow for that case.
+Applying a system-controlled retention/expiration policy to an existing IBM Content Manager ItemType does not retroactively populate retention/expiration metadata for existing items. `--backfill` is the explicit opt-in workflow for that case.
 
 Normal assignment:
 
@@ -33,28 +33,14 @@ The single-item and `--file` workflows share one guarded Java execution engine. 
 - IBM Db2
 - Oracle 19c as supported by IBM Content Manager 8.7
 
-All normal non-backfill commands continue to use the IBM CM SDK and do not depend on the direct-database dialect.
-
-The database is selected from the backfill JDBC URL:
+The database is selected from the direct JDBC URL:
 
 ```text
 jdbc:db2:...     -> DB2
 jdbc:oracle:...  -> Oracle
 ```
 
-It can also be fixed explicitly with:
-
-```dotenv
-BACKFILL_DB_TYPE=db2
-```
-
-or:
-
-```dotenv
-BACKFILL_DB_TYPE=oracle
-```
-
-A configured type that conflicts with the JDBC URL is rejected.
+It can also be fixed explicitly with `BACKFILL_DB_TYPE=db2` or `BACKFILL_DB_TYPE=oracle`. A configured type that conflicts with the JDBC URL is rejected.
 
 ## Common logical SQL
 
@@ -69,8 +55,6 @@ WHERE ICM$RETENTIONDATE IS NULL
 ```
 
 The physical creation timestamp column is `CREATETS`, **not** `ICM$CREATETS`.
-
-IBM documents `CreateTS`, `ICM$RetentionDate`, and `ICM$AutoDeleteDate` on the `ICMUTnnnnnsss` component-root table.
 
 ## DB2 SQL dialect
 
@@ -97,14 +81,24 @@ FETCH FIRST 1 ROW ONLY
 
 ## Oracle SQL dialect
 
-Oracle timestamp arithmetic is generated without NLS-dependent string/date conversion:
+The Oracle dialect follows the interval-literal form used in IBM CM SQL examples:
 
 ```sql
-CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
-CREATETS + NUMTOYMINTERVAL(6, 'MONTH')
-CREATETS + NUMTODSINTERVAL(364, 'DAY')   -- 52 weeks
-CREATETS + NUMTODSINTERVAL(365, 'DAY')
+CREATETS + INTERVAL '1' YEAR
+CREATETS + INTERVAL '6' MONTH
+CREATETS + INTERVAL '364' DAY(3)   -- 52 weeks
+CREATETS + INTERVAL '365' DAY(3)
 ```
+
+`WEEK` is converted to an exact number of days (`amount * 7`). Oracle interval literals default to two digits of leading precision, so the generator adds explicit precision whenever needed:
+
+```text
+INTERVAL '300' MONTH(3)
+INTERVAL '364' DAY(3)
+INTERVAL '365' DAY(3)
+```
+
+Leading precision greater than nine digits is refused instead of producing invalid Oracle SQL.
 
 The detailed plan uses:
 
@@ -118,7 +112,7 @@ The fail-fast existence probe uses:
 AND ROWNUM = 1
 ```
 
-`WEEK` is converted to an exact number of days (`amount * 7`). No user-provided SQL fragment is accepted.
+No user-provided SQL fragment is accepted.
 
 ## Supported policy type
 
@@ -136,20 +130,20 @@ Supported units are YEAR, MONTH, WEEK, and DAY. Event-driven, retention-enabled,
 
 ## Root-table resolution
 
-The user never supplies an `ICMUT...` table name. The tool resolves the root component using the ItemType ID and CM library-server metadata:
+The user never supplies an `ICMUT...` table name. The tool resolves the root component from CM library-server metadata using:
 
 ```text
 ICMSTCOMPDEFS
 ICMSTITEMTYPEDEFS
 ```
 
-It then derives:
+It derives:
 
 ```text
 ICMUT<COMPONENTTYPEID><SEGMENTID>
 ```
 
-The generated identifier and schema are strictly validated before insertion into SQL. Multi-segment cases continue to fail closed.
+The generated identifier and schema are strictly validated before insertion into SQL. Multi-segment cases fail closed.
 
 ## Detailed dry-run plan
 
@@ -180,7 +174,7 @@ Retention date already set: 0
 Equivalent Oracle formula output is, for example:
 
 ```text
-Formula                   : ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
+Formula                   : ICM$AUTODELETEDATE = CREATETS + INTERVAL '1' YEAR
 ```
 
 `Immediately expired after` is critical: those rows receive a date already in the past and can become eligible for AUTO_DELETE after policy assignment.
@@ -283,7 +277,7 @@ detailed plan + fingerprints
 
 The direct database transaction and IBM CM API assignment are not one distributed transaction. A failure after database COMMIT can therefore leave backfilled rows without a completed policy assignment. This is deliberately exposed with exit `6`.
 
-## Configuration: preferred neutral form
+## Configuration
 
 ### DB2
 
@@ -302,7 +296,7 @@ Type-4 example:
 BACKFILL_JDBC_URL=jdbc:db2://dbhost.example:50000/LSDB
 ```
 
-For backward compatibility, the old `DB2_DATABASE`, `DB2_JDBC_URL`, `DB2_USER`, `DB2_PASSWORD`, `DB2_SCHEMA`, and `DB2_JDBC_JAR` names remain accepted. If no backfill database settings exist at all, the legacy DB2 default `jdbc:db2:<CM_DATABASE>` remains in effect.
+For backward compatibility, `DB2_DATABASE`, `DB2_JDBC_URL`, `DB2_USER`, `DB2_PASSWORD`, `DB2_SCHEMA`, and `DB2_JDBC_JAR` remain accepted. If no direct-database settings exist at all, the legacy DB2 default `jdbc:db2:<CM_DATABASE>` remains in effect.
 
 ### Oracle 19c
 
@@ -316,11 +310,13 @@ BACKFILL_SCHEMA=ICMADMIN
 BACKFILL_JDBC_JAR=/u01/app/oracle/product/19.0.0/dbhome_1/jdbc/lib/ojdbc8.jar
 ```
 
-IBM Content Manager 8.7 requires `ojdbc8.jar` for Oracle users. The launcher can find it automatically under `$ORACLE_HOME/jdbc/lib` or known IBM/WAS locations; an explicit `BACKFILL_JDBC_JAR` is the most deterministic option.
+Oracle requires an explicit JDBC URL. The tool does not manufacture listener/service information from `CM_DATABASE`.
 
-Oracle requires an explicit JDBC URL. The tool does not manufacture a listener/service string from `CM_DATABASE`.
+`ORACLE_HOME` is read from `.env` as well as the process environment. The launcher can discover `ojdbc8.jar` under `$ORACLE_HOME/jdbc/lib` and known IBM/WAS locations. Explicit `BACKFILL_JDBC_JAR` remains the most deterministic option.
 
-Oracle aliases `ORACLE_JDBC_URL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`, and `ORACLE_JDBC_JAR` are also accepted, but `BACKFILL_*` is preferred.
+Oracle aliases `ORACLE_JDBC_URL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`, and `ORACLE_JDBC_JAR` are accepted, but `BACKFILL_*` is preferred.
+
+A missing explicitly configured direct-JDBC driver fails `--backfill` and is surfaced by `doctor`; it does not block ordinary CM-SDK commands.
 
 The direct-database user needs SELECT access to the relevant CM metadata/root tables and UPDATE permission on target root tables.
 
@@ -331,7 +327,7 @@ bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill
 ```
 
-The real execution output explicitly identifies the selected database:
+Real execution output explicitly identifies the selected database:
 
 ```text
 Applying existing-item backfill
@@ -347,7 +343,7 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService` reuses one JDBC connection across the batch. Phase 1 still validates every ItemType before the first mutation; Phase 2 remains sequential, fail-fast, and non-atomic.
+The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService` reuses one JDBC connection across the batch. Phase 1 validates every ItemType before the first mutation; Phase 2 remains sequential, fail-fast, and non-atomic.
 
 ## Self-test
 
@@ -355,7 +351,7 @@ The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService`
 
 - DB2 and Oracle JDBC URL detection
 - DB2 YEAR/MONTH/WEEK/DAY duration syntax
-- Oracle `NUMTOYMINTERVAL` / `NUMTODSINTERVAL` generation
+- Oracle interval-literal generation and leading precision
 - Oracle WEEK-to-DAY conversion
 - DB2 `CURRENT TIMESTAMP`
 - Oracle `CURRENT_TIMESTAMP`
