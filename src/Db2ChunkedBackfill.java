@@ -8,6 +8,7 @@ final class Db2ChunkedBackfill {
     static final int CHUNKING_THRESHOLD_ROWS = 10000;
     static final int DEFAULT_CHUNK_ROWS = 250000;
     static final int MIN_CHUNK_ROWS = 1000;
+    static final int MAX_CATCHUP_PASSES = 20;
 
     interface CommitGuard {
         void verify(long committedRows) throws Exception;
@@ -28,6 +29,7 @@ final class Db2ChunkedBackfill {
         long totalUpdated = 0L;
         int chunkRows = initialChunkRows(plan.plannedFillableRows);
         int chunkNumber = 0;
+        int catchupPasses = 0;
         try {
             if (originalAutoCommit) db.setAutoCommit(false);
 
@@ -93,26 +95,40 @@ final class Db2ChunkedBackfill {
                     }
                 }
 
-                if (updated < chunkRows) break;
-            }
+                // A short chunk used to be treated as proof that the original
+                // eligible set was exhausted. On an active ItemType, however,
+                // new rows can be created while a multi-minute backfill is
+                // running. Re-count after every short chunk and catch those rows
+                // up before assigning the policy.
+                if (updated < chunkRows) {
+                    long remaining = countRemaining(db, table);
+                    if (remaining == 0) {
+                        return checkedResult(totalUpdated, remaining);
+                    }
 
-            long remaining = queryLong(db,
-                    "SELECT COUNT(*) FROM " + table
-                            + " WHERE ICM$RETENTIONDATE IS NULL"
-                            + " AND ICM$AUTODELETEDATE IS NULL");
-            if (remaining != 0) {
-                throw new CliException("Chunked DB2 backfill committed " + totalUpdated
-                        + " row(s), but " + remaining
-                        + " row(s) still have NULL retention/auto-delete metadata."
-                        + " Policy assignment was not started; review concurrent writes and retry.", 6);
-            }
+                    long fillableRemaining = countFillableRemaining(db, table);
+                    if (fillableRemaining == 0) {
+                        throw new CliException("Chunked DB2 backfill committed " + totalUpdated
+                                + " row(s), but " + remaining
+                                + " row(s) still have NULL retention/auto-delete metadata and are"
+                                + " not backfillable because CREATETS is NULL. Policy assignment"
+                                + " was not started.", 6);
+                    }
 
-            if (totalUpdated > Integer.MAX_VALUE) {
-                throw new CliException("Chunked DB2 backfill committed more than "
-                        + Integer.MAX_VALUE + " row(s); final state is complete but the current"
-                        + " runtime cannot represent the update count safely. Review before assignment.", 6);
+                    catchupPasses++;
+                    if (catchupPasses > MAX_CATCHUP_PASSES) {
+                        throw new CliException("Chunked DB2 backfill committed " + totalUpdated
+                                + " row(s), but concurrent writes kept " + remaining
+                                + " row(s) pending after " + MAX_CATCHUP_PASSES
+                                + " catch-up pass(es). Policy assignment was not started."
+                                + " Retry during lower write activity or briefly quiesce writers.", 6);
+                    }
+
+                    System.out.println("  Catch-up " + catchupPasses + " pending : " + remaining
+                            + " row(s) appeared/changed during backfill; continuing before assignment");
+                    chunkRows = catchupChunkRows(fillableRemaining, chunkRows);
+                }
             }
-            return new BackfillResult((int) totalUpdated, remaining);
         } finally {
             backfill.restoreConnectionState(db, originalAutoCommit);
         }
@@ -122,6 +138,13 @@ final class Db2ChunkedBackfill {
         if (plannedRows <= 0) return MIN_CHUNK_ROWS;
         long bounded = Math.min((long) DEFAULT_CHUNK_ROWS,
                 Math.max((long) MIN_CHUNK_ROWS, plannedRows));
+        return (int) bounded;
+    }
+
+    static int catchupChunkRows(long fillableRemaining, int currentChunkRows) {
+        if (fillableRemaining <= 0) return MIN_CHUNK_ROWS;
+        long bounded = Math.min((long) currentChunkRows,
+                Math.max((long) MIN_CHUNK_ROWS, fillableRemaining));
         return (int) bounded;
     }
 
@@ -141,6 +164,30 @@ final class Db2ChunkedBackfill {
             current = current.getNextException();
         }
         return false;
+    }
+
+    private static BackfillResult checkedResult(long totalUpdated, long remaining) {
+        if (totalUpdated > Integer.MAX_VALUE) {
+            throw new CliException("Chunked DB2 backfill committed more than "
+                    + Integer.MAX_VALUE + " row(s); final state is complete but the current"
+                    + " runtime cannot represent the update count safely. Review before assignment.", 6);
+        }
+        return new BackfillResult((int) totalUpdated, remaining);
+    }
+
+    private static long countRemaining(Connection db, String table) throws SQLException {
+        return queryLong(db,
+                "SELECT COUNT(*) FROM " + table
+                        + " WHERE ICM$RETENTIONDATE IS NULL"
+                        + " AND ICM$AUTODELETEDATE IS NULL");
+    }
+
+    private static long countFillableRemaining(Connection db, String table) throws SQLException {
+        return queryLong(db,
+                "SELECT COUNT(*) FROM " + table
+                        + " WHERE ICM$RETENTIONDATE IS NULL"
+                        + " AND ICM$AUTODELETEDATE IS NULL"
+                        + " AND CREATETS IS NOT NULL");
     }
 
     private static long queryLong(Connection db, String sql) throws SQLException {
