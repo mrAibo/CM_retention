@@ -6,7 +6,7 @@ import java.nio.file.Paths;
 import java.util.Locale;
 
 public final class CmRetention {
-    static final String VERSION = "0.4.0";
+    static final String VERSION = "0.4.1";
 
     private CmRetention() {}
 
