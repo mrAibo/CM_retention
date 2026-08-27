@@ -51,21 +51,40 @@ final class PolicyFingerprint {
     }
 
     static PolicyFingerprint from(DKRetentionPolicyDefICM policy) {
+        boolean retentionEnabled = policy.isRetentionEnabled();
+        int retentionAmount = retentionEnabled ? policy.getRetentionTimePeriod() : 0;
+        String retentionUnit = retentionEnabled
+                ? String.valueOf(policy.getDefaultRetentionTimeUnit()) : "";
+
+        boolean expirationEnabled = policy.isExpirationEnabled();
+        int expirationAmount = expirationEnabled ? policy.getExpirationTimePeriod() : 0;
+        String expirationUnit = expirationEnabled
+                ? String.valueOf(policy.getDefaultExpirationTimeUnit()) : "";
+        String expirationAction = expirationEnabled
+                ? String.valueOf(policy.getExpirationAction()) : "";
+
+        boolean autoDelete = expirationEnabled && "AUTO_DELETE".equals(expirationAction);
+        String schedule = autoDelete ? policy.getDeleteExpiredItemsScheduleInformation() : "";
+        int commitCount = autoDelete ? policy.getDeleteExpiredItemsCommitCount() : 0;
+        int maxItems = autoDelete ? policy.getDeleteExpiredItemsMaximumRows() : 0;
+        int maxDuration = autoDelete ? policy.getDeleteExpiredItemsMaximumDuration() : 0;
+        boolean forceCheckin = autoDelete && policy.isDeleteExpiredItemsForceCheckInEnabled();
+
         return new PolicyFingerprint(
                 policy.getName(),
                 String.valueOf(policy.getRetentionType()),
-                policy.isRetentionEnabled(),
-                policy.getRetentionTimePeriod(),
-                String.valueOf(policy.getDefaultRetentionTimeUnit()),
-                policy.isExpirationEnabled(),
-                policy.getExpirationTimePeriod(),
-                String.valueOf(policy.getDefaultExpirationTimeUnit()),
-                String.valueOf(policy.getExpirationAction()),
-                policy.getDeleteExpiredItemsScheduleInformation(),
-                policy.getDeleteExpiredItemsCommitCount(),
-                policy.getDeleteExpiredItemsMaximumRows(),
-                policy.getDeleteExpiredItemsMaximumDuration(),
-                policy.isDeleteExpiredItemsForceCheckInEnabled());
+                retentionEnabled,
+                retentionAmount,
+                retentionUnit,
+                expirationEnabled,
+                expirationAmount,
+                expirationUnit,
+                expirationAction,
+                schedule,
+                commitCount,
+                maxItems,
+                maxDuration,
+                forceCheckin);
     }
 
     void requireSame(PolicyFingerprint actual, String stage, int exitCode) {
