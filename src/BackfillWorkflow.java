@@ -49,20 +49,32 @@ final class BackfillWorkflow {
         int postBackfillExit = result.changedRows() ? 6 : 5;
 
         long guardStarted = Timing.start();
-        cm.closeQuietly();
-        DKItemTypeDefICM preAssignItem = cm.requireItemType(validated.itemTypeName);
-        String preAssignCurrent = CmService.normalizePolicy(preAssignItem.getItemTypeRetentionPolicyName());
-        requireExpectedAssignmentState(
-                validated, preAssignCurrent, postBackfillExit,
-                "after DB2 COMMIT and before policy assignment");
+        DKItemTypeDefICM preAssignItem;
+        String preAssignCurrent;
+        try {
+            cm.closeQuietly();
+            preAssignItem = cm.requireItemType(validated.itemTypeName);
+            preAssignCurrent = CmService.normalizePolicy(preAssignItem.getItemTypeRetentionPolicyName());
+            requireExpectedAssignmentState(
+                    validated, preAssignCurrent, postBackfillExit,
+                    "after DB2 COMMIT and before policy assignment");
 
-        DKRetentionPolicyDefICM preAssignPolicy = cm.requirePolicyFresh(validated.policyName);
-        validated.plan.policyFingerprint.requireSame(
-                PolicyFingerprint.from(preAssignPolicy),
-                "after DB2 COMMIT and before policy assignment", postBackfillExit);
-        backfill.requireRootUnchanged(
-                preAssignItem, validated.plan.rootFingerprint,
-                "after DB2 COMMIT and before policy assignment", postBackfillExit);
+            DKRetentionPolicyDefICM preAssignPolicy = cm.requirePolicyFresh(validated.policyName);
+            validated.plan.policyFingerprint.requireSame(
+                    PolicyFingerprint.from(preAssignPolicy),
+                    "after DB2 COMMIT and before policy assignment", postBackfillExit);
+            backfill.requireRootUnchanged(
+                    preAssignItem, validated.plan.rootFingerprint,
+                    "after DB2 COMMIT and before policy assignment", postBackfillExit);
+        } catch (Exception e) {
+            if (result.changedRows()) {
+                printEmbeddedProblem("Post-commit safety guard", e);
+                throw new CliException("Backfill was committed for " + validated.itemTypeName
+                        + ", but the post-commit safety guard failed. Policy assignment was not started."
+                        + " Review the ItemType, policy and DB2 state before retrying.", 6);
+            }
+            throw e;
+        }
         long guardNanos = Timing.elapsed(guardStarted);
 
         Exception assignmentProblem = null;
