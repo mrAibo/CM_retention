@@ -3,9 +3,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
-/** DB2-only bounded UPDATE/COMMIT executor for large existing-item backfills. */
+/** DB2-only bounded UPDATE/COMMIT executor for existing-item backfills. */
 final class Db2ChunkedBackfill {
-    static final int CHUNKING_THRESHOLD_ROWS = 10000;
     static final int DEFAULT_CHUNK_ROWS = 250000;
     static final int MIN_CHUNK_ROWS = 1000;
     static final int MAX_CATCHUP_PASSES = 20;
@@ -17,8 +16,10 @@ final class Db2ChunkedBackfill {
     private Db2ChunkedBackfill() { }
 
     static boolean shouldUse(BackfillService backfill, BackfillWritePlan plan) {
-        return "DB2".equals(backfill.databaseDisplayName())
-                && plan.plannedFillableRows > CHUNKING_THRESHOLD_ROWS;
+        // Since 0.4.4 every DB2 backfill uses this bounded executor. Large
+        // plans need chunked COMMITs for SQL0964C resilience; small/resume plans
+        // need the same residual-row catch-up to close the concurrent-write gap.
+        return "DB2".equals(backfill.databaseDisplayName());
     }
 
     static BackfillResult apply(BackfillService backfill,
@@ -37,7 +38,7 @@ final class Db2ChunkedBackfill {
             String table = backfill.qualifiedTable(plan.rootFingerprint.tableName);
             String baseUpdate = BackfillService.buildUpdateSql(table, plan.durationSql);
 
-            System.out.println("  Write mode        : DB2 chunked COMMIT");
+            System.out.println("  Write mode        : DB2 bounded COMMIT");
             System.out.println("  Initial chunk     : " + chunkRows + " row(s)");
 
             while (true) {
@@ -45,7 +46,7 @@ final class Db2ChunkedBackfill {
                     catchupPasses++;
                     if (catchupPasses > MAX_CATCHUP_PASSES) {
                         long remaining = countRemaining(db, table);
-                        throw new CliException("Chunked DB2 backfill committed " + totalUpdated
+                        throw new CliException("Bounded DB2 backfill committed " + totalUpdated
                                 + " row(s), but concurrent writes kept " + remaining
                                 + " row(s) pending after " + MAX_CATCHUP_PASSES
                                 + " catch-up pass(es). Policy assignment was not started."
@@ -76,7 +77,7 @@ final class Db2ChunkedBackfill {
                         continue;
                     }
                     if (totalUpdated > 0) {
-                        throw new CliException("Chunked DB2 backfill already committed " + totalUpdated
+                        throw new CliException("Bounded DB2 backfill already committed " + totalUpdated
                                 + " row(s), then failed before completion: " + safeSqlMessage(e)
                                 + ". Policy assignment was not started. Re-run the same backfill;"
                                 + " already dated rows are protected by the NULL guards.", 6);
@@ -86,7 +87,7 @@ final class Db2ChunkedBackfill {
 
                 if (updated < 0) {
                     throw new CliException("DB2 JDBC driver returned an unknown update count for a"
-                            + " chunked backfill. Policy assignment was not started.",
+                            + " bounded backfill. Policy assignment was not started.",
                             totalUpdated > 0 ? 6 : 3);
                 }
 
@@ -125,7 +126,7 @@ final class Db2ChunkedBackfill {
 
                 long fillableRemaining = countFillableRemaining(db, table);
                 if (fillableRemaining == 0) {
-                    throw new CliException("Chunked DB2 backfill committed " + totalUpdated
+                    throw new CliException("Bounded DB2 backfill committed " + totalUpdated
                             + " row(s), but " + remaining
                             + " row(s) still have NULL retention/auto-delete metadata and are"
                             + " not backfillable because CREATETS is NULL. Policy assignment"
@@ -180,7 +181,7 @@ final class Db2ChunkedBackfill {
 
     private static BackfillResult checkedResult(long totalUpdated, long remaining) {
         if (totalUpdated > Integer.MAX_VALUE) {
-            throw new CliException("Chunked DB2 backfill committed more than "
+            throw new CliException("Bounded DB2 backfill committed more than "
                     + Integer.MAX_VALUE + " row(s); final state is complete but the current"
                     + " runtime cannot represent the update count safely. Review before assignment.", 6);
         }
