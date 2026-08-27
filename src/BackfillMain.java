@@ -4,7 +4,7 @@ import com.ibm.mm.sdk.common.DKRetentionPolicyDefICM;
 
 import java.sql.SQLException;
 
-/** Internal helper invoked by the launcher for explicit --backfill workflows. */
+/** Internal diagnostic helper; normal single and batch workflows use the guarded workflow classes. */
 public final class BackfillMain {
     private BackfillMain() { }
 
@@ -25,7 +25,7 @@ public final class BackfillMain {
             backfill = new BackfillService(BackfillConfig.from(base));
 
             DKItemTypeDefICM itemType = cm.requireItemType(itemTypeName);
-            DKRetentionPolicyDefICM policy = cm.requirePolicy(policyName);
+            DKRetentionPolicyDefICM policy = cm.requirePolicyFresh(policyName);
             String current = CmService.normalizePolicy(itemType.getItemTypeRetentionPolicyName());
 
             if ("plan".equals(action)) {
@@ -34,16 +34,18 @@ public final class BackfillMain {
                 validatePlan(plan);
             } else if ("apply".equals(action)) {
                 BackfillPlan plan = backfill.plan(itemType, policy, current, policyName);
-                printApplyHeader(plan);
                 validatePlan(plan);
-                BackfillResult result = backfill.apply(plan);
+                BackfillWritePlan writePlan = backfill.prepareWrite(
+                        itemType, policy, current, policyName, plan);
+                printApplyHeader(writePlan);
+                BackfillResult result = backfill.apply(writePlan);
                 System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
                 System.out.println("Remaining NULL rows: " + result.remainingRows);
             } else if ("verify".equals(action)) {
-                // remainingMissing() also validates the target assignment,
-                // supported policy semantics, root component and SegmentID.
-                // Avoid rebuilding the full seven-counter plan just to verify.
-                long remaining = backfill.remainingMissing(itemType, policy, current, policyName);
+                BackfillPlan plan = backfill.plan(itemType, policy, current, policyName);
+                validateSegment(plan);
+                long remaining = backfill.remainingMissing(
+                        itemType, plan.rootFingerprint, current, policyName);
                 if (remaining != 0) {
                     throw new CliException("Backfill verification failed: " + remaining
                             + " row(s) still have NULL retention/auto-delete metadata.", 6);
@@ -111,12 +113,12 @@ public final class BackfillMain {
         System.out.println("Only rows where ICM$RETENTIONDATE and ICM$AUTODELETEDATE are both NULL are changed.");
     }
 
-    static void printApplyHeader(BackfillPlan plan) {
+    static void printApplyHeader(BackfillWritePlan plan) {
         System.out.println("Applying existing-item backfill");
-        System.out.println("  Item type : " + plan.itemTypeName);
-        System.out.println("  Table     : " + plan.tableName);
-        System.out.println("  Formula   : ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql);
-        System.out.println("  Eligible  : " + plan.fillableRows);
+        System.out.println("  Item type        : " + plan.itemTypeName);
+        System.out.println("  Table            : " + plan.rootFingerprint.tableName);
+        System.out.println("  Formula          : ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql);
+        System.out.println("  Planned eligible : " + plan.plannedFillableRows);
     }
 
     static void printVerificationOk(String itemTypeName, String policyName) {
