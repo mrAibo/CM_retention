@@ -98,20 +98,33 @@ final class OracleBackfillDialect implements BackfillDialect {
 
     @Override
     public String durationSql(int amount, DK_ICM_POLICY_TIME_UNIT unit) {
+        if (amount <= 0) {
+            throw new CliException("Oracle backfill requires a positive expiration period", 5);
+        }
         if (unit == DK_ICM_POLICY_TIME_UNIT.YEAR) {
-            return "INTERVAL '" + amount + "' YEAR";
+            return interval(amount, "YEAR");
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.MONTH) {
-            return "INTERVAL '" + amount + "' MONTH";
+            return interval(amount, "MONTH");
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.WEEK) {
-            long days = ((long) amount) * 7L;
-            return "INTERVAL '" + days + "' DAY";
+            return interval(((long) amount) * 7L, "DAY");
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.DAY) {
-            return "INTERVAL '" + amount + "' DAY";
+            return interval(amount, "DAY");
         }
         throw new CliException("Unsupported expiration unit for Oracle backfill: " + unit, 5);
+    }
+
+    private static String interval(long amount, String unit) {
+        String digits = Long.toString(amount);
+        int precision = digits.length();
+        if (precision > 9) {
+            throw new CliException("Oracle interval is too large for backfill: "
+                    + amount + " " + unit + " (maximum leading precision is 9)", 5);
+        }
+        String precisionSql = precision > 2 ? "(" + precision + ")" : "";
+        return "INTERVAL '" + amount + "' " + unit + precisionSql;
     }
 
     @Override
