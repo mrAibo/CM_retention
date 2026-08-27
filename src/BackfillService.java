@@ -18,9 +18,14 @@ import java.util.Locale;
  * This class is intentionally separate from CmService: CmService owns IBM CM
  * API mutations, while this service owns the explicit SQL backfill requested
  * through --backfill.
+ *
+ * One BackfillService instance lazily opens one DB2 connection and reuses it
+ * for its lifetime. BatchMain therefore avoids reconnecting to DB2 for every
+ * ItemType. Call closeQuietly() when the workflow is complete.
  */
 final class BackfillService {
     private final BackfillConfig config;
+    private Connection connection;
 
     BackfillService(BackfillConfig config) {
         this.config = config;
@@ -33,41 +38,34 @@ final class BackfillService {
         validatePolicy(policy);
         validateAssignmentState(currentPolicy, targetPolicy);
 
-        Connection connection = connect();
-        try {
-            RootTable root = resolveRootTable(connection, itemType.getIntId());
-            String table = qualified(root.tableName);
-            String duration = durationSql(policy);
-            String expirationExpression = "CREATETS + " + duration;
-            String missing = "ICM$RETENTIONDATE IS NULL AND ICM$AUTODELETEDATE IS NULL";
+        Connection db = connection();
+        RootTable root = resolveRootTable(db, itemType.getIntId());
+        String table = qualified(root.tableName);
+        String duration = durationSql(policy);
+        String expirationExpression = "CREATETS + " + duration;
+        String missing = "ICM$RETENTIONDATE IS NULL AND ICM$AUTODELETEDATE IS NULL";
 
-            long total = queryLong(connection, "SELECT COUNT(*) FROM " + table);
-            long missingRows = queryLong(connection,
-                    "SELECT COUNT(*) FROM " + table + " WHERE " + missing);
-            long fillableRows = queryLong(connection,
-                    "SELECT COUNT(*) FROM " + table + " WHERE " + missing
-                            + " AND CREATETS IS NOT NULL");
-            long missingCreateTs = queryLong(connection,
-                    "SELECT COUNT(*) FROM " + table + " WHERE " + missing
-                            + " AND CREATETS IS NULL");
-            long immediateRows = queryLong(connection,
-                    "SELECT COUNT(*) FROM " + table + " WHERE " + missing
-                            + " AND CREATETS IS NOT NULL AND "
-                            + expirationExpression + " <= CURRENT TIMESTAMP");
-            long existingAutoDelete = queryLong(connection,
-                    "SELECT COUNT(*) FROM " + table + " WHERE ICM$AUTODELETEDATE IS NOT NULL");
-            long retentionSet = queryLong(connection,
-                    "SELECT COUNT(*) FROM " + table + " WHERE ICM$RETENTIONDATE IS NOT NULL");
+        // Keep all plan counters in one aggregate SELECT. The previous
+        // implementation issued seven independent COUNT queries, which could
+        // scan a large ICMUT root table repeatedly.
+        String sql = "SELECT "
+                + "COUNT(*), "
+                + "SUM(CASE WHEN " + missing + " THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN " + missing + " AND CREATETS IS NOT NULL THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN " + missing + " AND CREATETS IS NULL THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN " + missing + " AND CREATETS IS NOT NULL AND "
+                + expirationExpression + " <= CURRENT TIMESTAMP THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN ICM$AUTODELETEDATE IS NOT NULL THEN 1 ELSE 0 END), "
+                + "SUM(CASE WHEN ICM$RETENTIONDATE IS NOT NULL THEN 1 ELSE 0 END) "
+                + "FROM " + table;
+        long[] counts = queryCounts(db, sql, 7);
 
-            return new BackfillPlan(
-                    itemType.getName(), targetPolicy, CmService.normalizePolicy(currentPolicy),
-                    itemType.getIntId(), root.componentTypeId, root.segmentId, root.tableName,
-                    policy.getExpirationTimePeriod(), sqlUnit(policy.getDefaultExpirationTimeUnit()),
-                    duration, total, missingRows, fillableRows, missingCreateTs,
-                    immediateRows, existingAutoDelete, retentionSet);
-        } finally {
-            closeQuietly(connection);
-        }
+        return new BackfillPlan(
+                itemType.getName(), targetPolicy, CmService.normalizePolicy(currentPolicy),
+                itemType.getIntId(), root.componentTypeId, root.segmentId, root.tableName,
+                policy.getExpirationTimePeriod(), sqlUnit(policy.getDefaultExpirationTimeUnit()),
+                duration, counts[0], counts[1], counts[2], counts[3],
+                counts[4], counts[5], counts[6]);
     }
 
     BackfillResult apply(BackfillPlan plan) throws Exception {
@@ -79,11 +77,14 @@ final class BackfillService {
             return new BackfillResult(0, 0);
         }
 
-        Connection connection = connect();
+        Connection db = connection();
         boolean committed = false;
         int updated = 0;
+        boolean originalAutoCommit = db.getAutoCommit();
         try {
-            connection.setAutoCommit(false);
+            if (originalAutoCommit) {
+                db.setAutoCommit(false);
+            }
             String table = qualified(plan.tableName);
             String sql = "UPDATE " + table
                     + " SET ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql
@@ -91,16 +92,16 @@ final class BackfillService {
                     + " AND ICM$AUTODELETEDATE IS NULL"
                     + " AND CREATETS IS NOT NULL";
 
-            Statement statement = connection.createStatement();
+            Statement statement = db.createStatement();
             try {
                 updated = statement.executeUpdate(sql);
             } finally {
                 statement.close();
             }
-            connection.commit();
+            db.commit();
             committed = true;
 
-            long remaining = queryLong(connection,
+            long remaining = queryLong(db,
                     "SELECT COUNT(*) FROM " + table
                             + " WHERE ICM$RETENTIONDATE IS NULL"
                             + " AND ICM$AUTODELETEDATE IS NULL");
@@ -112,7 +113,7 @@ final class BackfillService {
             return new BackfillResult(updated, remaining);
         } catch (SQLException e) {
             if (!committed) {
-                rollbackQuietly(connection);
+                rollbackQuietly(db);
                 throw e;
             }
             throw new CliException("Backfill DB2 COMMIT completed for " + updated
@@ -120,7 +121,7 @@ final class BackfillService {
                     + safeSqlState(e) + "): " + safeSqlMessage(e)
                     + ". Policy assignment was not started; verify DB2 state before retrying.", 6);
         } finally {
-            closeQuietly(connection);
+            restoreAutoCommitOrReconnect(db, originalAutoCommit);
         }
     }
 
@@ -134,35 +135,50 @@ final class BackfillService {
                     + " uses " + CmService.emptyAsDash(currentPolicy)
                     + " instead of " + targetPolicy, 6);
         }
-        Connection connection = connect();
+        Connection db = connection();
+        RootTable root = resolveRootTable(db, itemType.getIntId());
+        if (root.segmentId != 1) {
+            throw new CliException("Backfill verification refused: ItemType uses component SegmentID "
+                    + root.segmentId + ". Multi-segment backfill is not implemented.", 6);
+        }
+        return queryLong(db,
+                "SELECT COUNT(*) FROM " + qualified(root.tableName)
+                        + " WHERE ICM$RETENTIONDATE IS NULL"
+                        + " AND ICM$AUTODELETEDATE IS NULL");
+    }
+
+    void closeQuietly() {
+        Connection db = connection;
+        connection = null;
+        if (db == null) return;
         try {
-            RootTable root = resolveRootTable(connection, itemType.getIntId());
-            return queryLong(connection,
-                    "SELECT COUNT(*) FROM " + qualified(root.tableName)
-                            + " WHERE ICM$RETENTIONDATE IS NULL"
-                            + " AND ICM$AUTODELETEDATE IS NULL");
-        } finally {
-            closeQuietly(connection);
+            if (!db.isClosed()) db.close();
+        } catch (Exception ignored) {
+            // Best-effort cleanup.
         }
     }
 
-    private Connection connect() throws Exception {
+    private Connection connection() throws Exception {
+        if (connection != null && !connection.isClosed()) {
+            return connection;
+        }
         try {
             Class.forName("com.ibm.db2.jcc.DB2Driver");
         } catch (ClassNotFoundException e) {
             throw new CliException("DB2 JDBC driver not found. Add db2jcc4.jar via DB2_JDBC_JAR"
                     + " in the selected .env file or place the driver on the runtime classpath.", 2);
         }
-        return DriverManager.getConnection(config.jdbcUrl, config.user, config.password);
+        connection = DriverManager.getConnection(config.jdbcUrl, config.user, config.password);
+        return connection;
     }
 
-    private RootTable resolveRootTable(Connection connection, int itemTypeId) throws SQLException {
+    private RootTable resolveRootTable(Connection db, int itemTypeId) throws SQLException {
         String sql = "SELECT C.COMPONENTTYPEID, I.SEGMENTID"
                 + " FROM " + config.schema + ".ICMSTCOMPDEFS C"
                 + " JOIN " + config.schema + ".ICMSTITEMTYPEDEFS I"
                 + " ON I.ITEMTYPEID=C.ITEMTYPEID"
                 + " WHERE C.ITEMTYPEID=? AND C.PARENTCOMPTYPEID=0";
-        PreparedStatement statement = connection.prepareStatement(sql);
+        PreparedStatement statement = db.prepareStatement(sql);
         try {
             statement.setInt(1, itemTypeId);
             ResultSet rs = statement.executeQuery();
@@ -190,8 +206,27 @@ final class BackfillService {
         }
     }
 
-    private long queryLong(Connection connection, String sql) throws SQLException {
-        Statement statement = connection.createStatement();
+    private long[] queryCounts(Connection db, String sql, int columns) throws SQLException {
+        Statement statement = db.createStatement();
+        try {
+            ResultSet rs = statement.executeQuery(sql);
+            try {
+                if (!rs.next()) throw new SQLException("Aggregate query returned no row");
+                long[] values = new long[columns];
+                for (int i = 0; i < columns; i++) {
+                    values[i] = rs.getLong(i + 1);
+                }
+                return values;
+            } finally {
+                rs.close();
+            }
+        } finally {
+            statement.close();
+        }
+    }
+
+    private long queryLong(Connection db, String sql) throws SQLException {
+        Statement statement = db.createStatement();
         try {
             ResultSet rs = statement.executeQuery(sql);
             try {
@@ -263,14 +298,21 @@ final class BackfillService {
                 ? e.getClass().getName() : e.getMessage();
     }
 
-    private static void rollbackQuietly(Connection connection) {
-        if (connection == null) return;
-        try { connection.rollback(); } catch (Exception ignored) { }
+    private static void rollbackQuietly(Connection db) {
+        if (db == null) return;
+        try { db.rollback(); } catch (Exception ignored) { }
     }
 
-    private static void closeQuietly(Connection connection) {
-        if (connection == null) return;
-        try { connection.close(); } catch (Exception ignored) { }
+    private void restoreAutoCommitOrReconnect(Connection db, boolean originalAutoCommit) {
+        if (db == null) return;
+        try {
+            if (!db.isClosed() && db.getAutoCommit() != originalAutoCommit) {
+                db.setAutoCommit(originalAutoCommit);
+            }
+        } catch (Exception ignored) {
+            // Do not keep a connection whose transaction state is uncertain.
+            closeQuietly();
+        }
     }
 
     private static final class RootTable {
