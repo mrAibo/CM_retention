@@ -37,7 +37,7 @@ public final class BackfillMain {
                 validatePlan(plan);
                 BackfillWritePlan writePlan = backfill.prepareWrite(
                         itemType, policy, current, policyName, plan);
-                printApplyHeader(writePlan);
+                printApplyHeader(backfill, writePlan);
                 BackfillResult result = backfill.apply(writePlan);
                 System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
                 System.out.println("Remaining NULL rows: " + result.remainingRows);
@@ -113,8 +113,9 @@ public final class BackfillMain {
         System.out.println("Only rows where ICM$RETENTIONDATE and ICM$AUTODELETEDATE are both NULL are changed.");
     }
 
-    static void printApplyHeader(BackfillWritePlan plan) {
+    static void printApplyHeader(BackfillService backfill, BackfillWritePlan plan) {
         System.out.println("Applying existing-item backfill");
+        System.out.println("  Database         : " + backfill.databaseDisplayName());
         System.out.println("  Item type        : " + plan.itemTypeName);
         System.out.println("  Table            : " + plan.rootFingerprint.tableName);
         System.out.println("  Formula          : ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql);
@@ -128,7 +129,7 @@ public final class BackfillMain {
     }
 
     static void printSqlException(SQLException e) {
-        System.err.println("DB2 ERROR");
+        System.err.println("DATABASE ERROR");
         System.err.println("Message:    " + e.getMessage());
         System.err.println("SQL state:  " + e.getSQLState());
         System.err.println("Error code: " + e.getErrorCode());
