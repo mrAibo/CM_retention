@@ -103,6 +103,9 @@ CM_PASSWORD=CHANGE_ME
 IBMCMROOT=/opt/IBM/db2cmv8
 JAVA_HOME=/opt/IBM/WebSphere/AppServer/java/8.0
 
+# Optional batch audit-log directory. Default: <application-home>/logs
+# CM_RETENTION_LOG_DIR=/var/log/cm-retention
+
 # Optional direct-database settings used only by explicit --backfill.
 # Preferred neutral names support both DB2 and Oracle.
 # BACKFILL_DB_TYPE=auto
@@ -181,6 +184,9 @@ Installation:
        bin/cm-retention doctor
        bin/cm-retention status
   8. Start with read-only commands or --dry-run before a real write.
+  9. Batch --file runs create audit logs under ./logs by default and perform an
+     independent final verification after the mutation phase. Confirmed final
+     mismatches are written to a generated *-retry.txt file.
 
 Create directly from a template, for example:
 
