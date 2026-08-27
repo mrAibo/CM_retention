@@ -58,19 +58,13 @@ final class PolicyDefaults {
         Properties properties = builtinProperties();
         String source = "built-in defaults";
 
-        String configuredPath = explicitPath;
-        boolean explicit = configuredPath != null && !configuredPath.trim().isEmpty();
-        if (!explicit) {
-            configuredPath = System.getenv("CM_RETENTION_POLICY_PROPERTIES");
-        }
-        if (configuredPath == null || configuredPath.trim().isEmpty()) {
-            configuredPath = defaultBundledPath();
-        }
+        boolean explicit = explicitPath != null && !explicitPath.trim().isEmpty();
+        String configuredPath = explicit ? explicitPath : defaultBundledPath();
 
         if (configuredPath != null && !configuredPath.trim().isEmpty()) {
             Path path = Paths.get(configuredPath).toAbsolutePath().normalize();
             if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
-                if (explicit || System.getenv("CM_RETENTION_POLICY_PROPERTIES") != null) {
+                if (explicit) {
                     throw new CliException("Policy properties file is not readable: " + path, 2);
                 }
             } else {
