@@ -30,6 +30,7 @@ final class Db2ChunkedBackfill {
         int chunkRows = initialChunkRows(plan.plannedFillableRows);
         int chunkNumber = 0;
         int catchupPasses = 0;
+        boolean catchupMode = false;
         try {
             if (originalAutoCommit) db.setAutoCommit(false);
 
@@ -40,6 +41,18 @@ final class Db2ChunkedBackfill {
             System.out.println("  Initial chunk     : " + chunkRows + " row(s)");
 
             while (true) {
+                if (catchupMode) {
+                    catchupPasses++;
+                    if (catchupPasses > MAX_CATCHUP_PASSES) {
+                        long remaining = countRemaining(db, table);
+                        throw new CliException("Chunked DB2 backfill committed " + totalUpdated
+                                + " row(s), but concurrent writes kept " + remaining
+                                + " row(s) pending after " + MAX_CATCHUP_PASSES
+                                + " catch-up pass(es). Policy assignment was not started."
+                                + " Retry during lower write activity or briefly quiesce writers.", 6);
+                    }
+                }
+
                 long chunkStarted = Timing.start();
                 int updated;
                 String sql = buildChunkUpdateSql(baseUpdate, chunkRows);
@@ -59,6 +72,7 @@ final class Db2ChunkedBackfill {
                                 + chunkRows + "; current chunk was rolled back. Retrying with "
                                 + smaller + " row(s).");
                         chunkRows = smaller;
+                        if (catchupMode) catchupPasses--;
                         continue;
                     }
                     if (totalUpdated > 0) {
@@ -95,39 +109,37 @@ final class Db2ChunkedBackfill {
                     }
                 }
 
-                // A short chunk used to be treated as proof that the original
-                // eligible set was exhausted. On an active ItemType, however,
-                // new rows can be created while a multi-minute backfill is
-                // running. Re-count after every short chunk and catch those rows
-                // up before assigning the policy.
-                if (updated < chunkRows) {
-                    long remaining = countRemaining(db, table);
-                    if (remaining == 0) {
-                        return checkedResult(totalUpdated, remaining);
-                    }
-
-                    long fillableRemaining = countFillableRemaining(db, table);
-                    if (fillableRemaining == 0) {
-                        throw new CliException("Chunked DB2 backfill committed " + totalUpdated
-                                + " row(s), but " + remaining
-                                + " row(s) still have NULL retention/auto-delete metadata and are"
-                                + " not backfillable because CREATETS is NULL. Policy assignment"
-                                + " was not started.", 6);
-                    }
-
-                    catchupPasses++;
-                    if (catchupPasses > MAX_CATCHUP_PASSES) {
-                        throw new CliException("Chunked DB2 backfill committed " + totalUpdated
-                                + " row(s), but concurrent writes kept " + remaining
-                                + " row(s) pending after " + MAX_CATCHUP_PASSES
-                                + " catch-up pass(es). Policy assignment was not started."
-                                + " Retry during lower write activity or briefly quiesce writers.", 6);
-                    }
-
-                    System.out.println("  Catch-up " + catchupPasses + " pending : " + remaining
-                            + " row(s) appeared/changed during backfill; continuing before assignment");
-                    chunkRows = catchupChunkRows(fillableRemaining, chunkRows);
+                // Main phase: full chunks can continue without a table-wide
+                // recount. The first short chunk marks the transition to a
+                // bounded catch-up phase. During catch-up every committed chunk
+                // is followed by a recount so continuous writers cannot make the
+                // loop unbounded.
+                if (!catchupMode && updated == chunkRows) {
+                    continue;
                 }
+
+                long remaining = countRemaining(db, table);
+                if (remaining == 0) {
+                    return checkedResult(totalUpdated, remaining);
+                }
+
+                long fillableRemaining = countFillableRemaining(db, table);
+                if (fillableRemaining == 0) {
+                    throw new CliException("Chunked DB2 backfill committed " + totalUpdated
+                            + " row(s), but " + remaining
+                            + " row(s) still have NULL retention/auto-delete metadata and are"
+                            + " not backfillable because CREATETS is NULL. Policy assignment"
+                            + " was not started.", 6);
+                }
+
+                if (!catchupMode) {
+                    catchupMode = true;
+                    catchupPasses = 0;
+                }
+                System.out.println("  Catch-up pending   : " + remaining
+                        + " row(s) appeared/changed during backfill; continuing before assignment"
+                        + " (next pass " + (catchupPasses + 1) + "/" + MAX_CATCHUP_PASSES + ")");
+                chunkRows = catchupChunkRows(fillableRemaining, chunkRows);
             }
         } finally {
             backfill.restoreConnectionState(db, originalAutoCommit);
