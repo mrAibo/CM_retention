@@ -1,4 +1,4 @@
-# cm-retention 0.4.1 – Betriebs- und Benutzerdokumentation
+# cm-retention 0.4.2 – Betriebs- und Benutzerdokumentation
 
 ## 1. Zweck
 
@@ -15,6 +15,8 @@ Unterstützt werden:
 - direkter Backfill auf DB2 und Oracle 19c
 - Policy-/Root-Fingerprints und Post-COMMIT-Schutz
 - verifizierte IBM-CM-Sekundärwarnungen im Batch ohne unnötigen Abbruch
+- unabhängige Batch-Endverifikation in einer zweiten JVM/frischen CM-Session
+- automatische Batch-Audit-Logs und Retry-Dateien für bestätigte Mismatches
 - Laufzeitmessungen
 - reiner Regressionstest mit `selftest`
 
@@ -87,11 +89,11 @@ bin/cm-retention selftest
 Erwartet:
 
 ```text
-cm-retention 0.4.1
+cm-retention 0.4.2
 Self-test: OK (... checks)
 ```
 
-Der Self-Test meldet sich nicht an Content Manager an und öffnet keine direkte DB2-/Oracle-Verbindung. Geprüft werden unter anderem Parser, Template-Erkennung, Fingerprints, `CREATETS`, DB2-/Oracle-SQL-Dialekte, Warning-Summary und Sekunden-Einheiten.
+Der Self-Test meldet sich nicht an Content Manager an und öffnet keine direkte DB2-/Oracle-Verbindung. Geprüft werden unter anderem Parser, Template-Erkennung, Fingerprints, `CREATETS`, DB2-/Oracle-SQL-Dialekte, Warning-Summary, Final-Verifier-Policyvergleich und Sekunden-Einheiten.
 
 ## 4. Policy-Vorlagen
 
@@ -515,7 +517,7 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --yes
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-Der gesamte Batch läuft in einem JVM-Prozess. Bei Backfill wird eine direkte JDBC-Verbindung über den Batch wiederverwendet. Phase 1 validiert alle ItemTypes vor dem ersten Write.
+Die Mutationsphase läuft in einem JVM-Prozess. Bei Backfill wird eine direkte JDBC-Verbindung über den Batch wiederverwendet. Phase 1 validiert alle ItemTypes vor dem ersten Write.
 
 Phase 2 bleibt:
 
@@ -528,17 +530,93 @@ verifizierte IBM-CM-Sekundärwarnungen: protokollieren und fortsetzen
 
 Es gibt keine parallelen DB2-/Oracle-UPDATEs.
 
-Bei ausschließlich sauberen Ergebnissen endet der Batch mit RC `0`. Wenn mindestens eine verifizierte Sekundärwarnung auftrat, aber alle ItemTypes den gewünschten finalen Zustand erreicht haben, sieht die Zusammenfassung beispielsweise so aus:
+### 9.1 Unabhängige Final-Verifikation ab 0.4.2
+
+Sobald ein echter Batch Phase 2 erreicht hat, startet der Launcher nach Ende/Abbruch der Mutationsphase eine **zweite JVM** mit einer neuen IBM-CM-Session. Diese liest jeden exakten ItemType aus der ursprünglichen Datei erneut.
+
+Erwarteter Endzustand:
 
 ```text
-Batch complete: 217/217 item types reached a verified final state.
-Clean success     : 180
-Verified warnings : 37
-Warning itemtypes : AM, ...
-Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.
+unassign --file ...      -> Retention policy = -
+assign --file ... POLICY -> Retention policy = POLICY
 ```
 
-Die Liste der Warning-ItemTypes wird kompakt begrenzt; der Zähler bleibt vollständig. Der Batch liefert dann RC `6`, obwohl er alle angeforderten ItemTypes abgearbeitet hat.
+Beispiel:
+
+```text
+Phase 3/3: independent final verification
+  Runtime   : new JVM / fresh CM session
+  Operation : unassign
+  Expected  : -
+  Item types: 217
+
+Final verification summary
+  Verified OK         : 214
+  State mismatches    : 3
+  Verification errors : 0
+```
+
+Der unabhängige Verifier läuft auch nach einem echten Phase-2-Abbruch. So sieht der Administrator nach einem Teil-Batch den tatsächlichen Gesamtzustand statt nur den bis zum Fehler erreichten Prefix.
+
+### 9.2 Retry-Datei
+
+Bestätigte Mismatches werden mit Soll-/Ist-Policy ausgegeben und automatisch in eine `*-retry.txt` geschrieben. Diese Datei enthält nur ItemTypes, deren tatsächlicher Zustand eindeutig vom Sollzustand abweicht.
+
+Beispiel:
+
+```bash
+bin/cm-retention unassign --file logs/cm-retention-batch-...-unassign-retry.txt --yes
+```
+
+Bei Assign wird die ursprüngliche Policy wieder angegeben:
+
+```bash
+bin/cm-retention assign --file logs/cm-retention-batch-...-assign-retry.txt AUTO_DELETE_1Y --yes
+```
+
+Bei `--backfill` wird beim Retry erneut `--backfill` verwendet. Bereits erfolgreich gesetzte Datensätze bleiben durch die NULL-Guards idempotent geschützt.
+
+Kann der SDK-Zustand eines ItemTypes nicht zuverlässig gelesen werden, wird er als `Verification error / state unknown` gemeldet und absichtlich **nicht** in die Retry-Datei aufgenommen.
+
+### 9.3 Audit-Log
+
+Jeder `--file`-Aufruf erhält ein Audit-Log. Standard:
+
+```text
+<application-home>/logs/cm-retention-batch-<timestamp>-<pid>-<operation>.log
+```
+
+Optional in `.env`:
+
+```dotenv
+CM_RETENTION_LOG_DIR=/var/log/cm-retention
+```
+
+Das Log enthält:
+
+- Tool-Version
+- Start-/Endzeit
+- Runtime-User und Host
+- exakten Batch-Befehl
+- verwendeten `.env`-Pfad
+- komplette Batch-Ausgabe
+- komplette Final-Verifier-Ausgabe
+- `batch_rc`, `verifier_rc`, `final_rc`
+
+Credentials werden nicht in das Audit-Log geschrieben. Kann das Log vor dem Batch nicht angelegt werden, startet die Batch-Mutation nicht.
+
+Dry-run, reine Phase-1-Fehler oder Abbruch vor Phase 2 werden geloggt, aber nicht final-verifiziert.
+
+### 9.4 Return-Code-Kombination
+
+```text
+Batch sauber + Verifier sauber       -> 0
+Batch sauber + Verifier nicht sauber -> 6
+verifizierte Sekundärwarnung(en)      -> 6
+echter Mutations-/Runtimefehler       -> ursprünglicher Fehler-RC
+```
+
+Bei einem echten Mutationsfehler bleibt dessen RC erhalten; der Verifier liefert zusätzlich den aktuellen Zustand und ggf. eine Retry-Datei.
 
 Der Backfill-Header zeigt die ausgewählte Datenbank:
 
@@ -559,16 +637,16 @@ Auf einem CM-8.7-Host mit echter `cmbicmsdk81.jar`:
 
 Der Build führt `SelfTestMain` vor dem Packaging aus.
 
-0.4.1 erzeugt:
+0.4.2 erzeugt:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.4.1.jar
+build/cm-retention-0.4.2.jar
 build/.version
 build/ret-policy.properties
 build/profiles/*.properties
-build/cm-retention-0.4.1-runtime.tar.gz
-build/SHA256SUMS-0.4.1
+build/cm-retention-0.4.2-runtime.tar.gz
+build/SHA256SUMS-0.4.2
 ```
 
 Das Runtime-Paket enthält keine IBM-SDK-/DB2-/Oracle-JARs und keine Credentials.
@@ -576,8 +654,8 @@ Das Runtime-Paket enthält keine IBM-SDK-/DB2-/Oracle-JARs und keine Credentials
 ## 11. Installation ohne Git
 
 ```bash
-tar -xzf cm-retention-0.4.1-runtime.tar.gz
-cd cm-retention-0.4.1
+tar -xzf cm-retention-0.4.2-runtime.tar.gz
+cd cm-retention-0.4.2
 cp .env.example .env
 chmod 600 .env
 vi .env
@@ -639,7 +717,12 @@ Prüfen:
 - `NULL create timestamp = 0`
 - `Immediately expired after`
 - Timing der Plan-Phase
-- bei Batch: `Clean success`, `Verified warnings` und finalen RC
+- bei Batch: Phase-2-Summary und Phase-3-Final-Verifikation
+- `State mismatches = 0`
+- `Verification errors = 0`
+- Pfad des Audit-Logs
+- falls erzeugt: Inhalt der Retry-Datei
+- finalen RC
 
 ## 13. Sicherheitsmodell
 
@@ -648,6 +731,17 @@ Normaler CM-Write:
 ```text
 resolve -> read -> validate -> plan -> confirm/dry-run
  -> mutate -> commit -> reconnect/verify
+```
+
+Batch zusätzlich:
+
+```text
+Phase 1: alle Inputs validieren
+ -> Phase 2: sequenzielle Mutationen + per-ItemType-Verifikation
+ -> neue JVM / neue CM-Session
+ -> Phase 3: jeden exakten ItemType erneut lesen
+ -> Mismatches/unknown states explizit ausgeben
+ -> bestätigte Mismatches optional als Retry-Datei
 ```
 
 Backfill:
@@ -669,7 +763,9 @@ Wichtige Regeln:
 - kein direktes Dokument-DELETE
 - keine parallelen Datenbank-Writes
 - verifizierte `OperationWarning` ist kein stiller Erfolg: sie bleibt sichtbar und führt im Batch-Summary zu RC `6`
-- nicht verifizierbare Fehler bleiben fail-fast
+- die unabhängige Final-Verifikation kann einen scheinbar sauberen Batch nachträglich auf RC `6` hochstufen
+- unklare Verifikationszustände werden nicht automatisch in Retry-Dateien aufgenommen
+- echte Mutations-/Runtimefehler werden durch den Final-Verifier nicht maskiert
 - Exit `6` bedeutet weiterhin: Warnung bzw. Zustand nach Persistenz/Partial-Success administrativ prüfen
 
 ## 14. Exit-Codes
@@ -681,7 +777,7 @@ Wichtige Regeln:
 | 3 | IBM-CM-/Datenbank-Laufzeitfehler |
 | 4 | ItemType/Policy nicht gefunden |
 | 5 | unsichere/widersprüchliche Operation vor relevantem Write verweigert |
-| 6 | verifizierte IBM-CM-Sekundärwarnung / Verifikationswarnung / Partial-Success-Zustand nach möglicher Persistenz |
+| 6 | verifizierte IBM-CM-Sekundärwarnung / unabhängige Final-Verifikationsabweichung / Verifikationswarnung / Partial-Success-Zustand nach möglicher Persistenz |
 
 ## 15. Weiterführende Dokumentation
 
