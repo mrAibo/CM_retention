@@ -271,19 +271,27 @@ DB2 uses `CURRENT TIMESTAMP` for the immediate-expiration plan calculation and `
 
 ## Oracle backfill SQL
 
-A one-year policy is generated as:
+The Oracle dialect follows the interval-literal form used by IBM's CM SQL examples. A one-year policy is generated as:
 
 ```text
-ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(1, 'YEAR')
+ICM$AUTODELETEDATE = CREATETS + INTERVAL '1' YEAR
 ```
 
-Oracle generation uses:
+Generation rules:
 
 ```text
-YEAR  -> NUMTOYMINTERVAL(N, 'YEAR')
-MONTH -> NUMTOYMINTERVAL(N, 'MONTH')
-WEEK  -> NUMTODSINTERVAL(N*7, 'DAY')
-DAY   -> NUMTODSINTERVAL(N, 'DAY')
+YEAR  -> INTERVAL 'N' YEAR
+MONTH -> INTERVAL 'N' MONTH
+WEEK  -> INTERVAL 'N*7' DAY
+DAY   -> INTERVAL 'N' DAY
+```
+
+Oracle interval literals have a default leading precision of two digits. The generator therefore adds an explicit precision whenever necessary, for example:
+
+```text
+300 months -> INTERVAL '300' MONTH(3)
+52 weeks   -> INTERVAL '364' DAY(3)
+365 days   -> INTERVAL '365' DAY(3)
 ```
 
 The Oracle plan uses `CURRENT_TIMESTAMP`; its one-row fail-fast probe uses `ROWNUM = 1`.
@@ -321,7 +329,7 @@ Detailed procedure: [docs/BACKFILL.md](docs/BACKFILL.md).
 
 # Direct database configuration for `--backfill`
 
-Normal non-backfill commands do not require these settings.
+Normal non-backfill commands do not require these settings. A missing explicitly configured direct-JDBC driver is enforced for `--backfill`/`doctor`, but does not block ordinary CM-SDK commands.
 
 ## Preferred DB2 configuration
 
@@ -364,7 +372,7 @@ Oracle requires an explicit JDBC URL. The tool deliberately does not infer liste
 
 Oracle aliases `ORACLE_JDBC_URL`, `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`, and `ORACLE_JDBC_JAR` are accepted, but `BACKFILL_*` is preferred.
 
-The launcher can locate `ojdbc8.jar` under `$ORACLE_HOME/jdbc/lib` or common IBM/WAS locations. An explicit `BACKFILL_JDBC_JAR` is the most deterministic production configuration.
+`ORACLE_HOME` can be read from `.env`; the launcher can locate `ojdbc8.jar` under `$ORACLE_HOME/jdbc/lib` or common IBM/WAS locations. An explicit `BACKFILL_JDBC_JAR` is the most deterministic production configuration.
 
 ---
 
