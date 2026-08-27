@@ -211,6 +211,12 @@ Immer zuerst:
 bin/cm-retention assign AM AUTO_DELETE_1Y --backfill --dry-run
 ```
 
+Der Single-Item-Dry-run zeigt die ausgewählte direkte Datenbank vor dem Detailplan explizit an:
+
+```text
+Backfill database           : Oracle
+```
+
 Die logische Operation lautet:
 
 ```sql
