@@ -39,7 +39,9 @@ final class BackfillWorkflow {
 
         printApplyHeader(backfill, writePlan);
         long dbStarted = Timing.start();
-        BackfillResult result = backfill.apply(writePlan);
+        BackfillResult result = Db2ChunkedBackfill.shouldUse(backfill, writePlan)
+                ? Db2ChunkedBackfill.apply(writePlan)
+                : backfill.apply(writePlan);
         long dbNanos = Timing.elapsed(dbStarted);
         System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
         System.out.println("Remaining NULL rows: " + result.remainingRows);
