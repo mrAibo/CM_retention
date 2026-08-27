@@ -11,6 +11,7 @@ public final class BackfillMain {
     public static void main(String[] args) {
         int rc = 0;
         CmService cm = null;
+        BackfillService backfill = null;
         try {
             if (args.length != 3) {
                 throw new CliException("Internal usage: BackfillMain plan|apply|verify ITEMTYPE POLICY", 2);
@@ -21,7 +22,7 @@ public final class BackfillMain {
 
             Config base = Config.fromEnvironment();
             cm = new CmService(base);
-            BackfillService backfill = new BackfillService(BackfillConfig.from(base));
+            backfill = new BackfillService(BackfillConfig.from(base));
 
             DKItemTypeDefICM itemType = cm.requireItemType(itemTypeName);
             DKRetentionPolicyDefICM policy = cm.requirePolicy(policyName);
@@ -46,9 +47,7 @@ public final class BackfillMain {
                     throw new CliException("Backfill verification failed: " + remaining
                             + " row(s) still have NULL retention/auto-delete metadata.", 6);
                 }
-                System.out.println("Backfill verification: OK");
-                System.out.println("Policy assignment    : " + itemTypeName + " -> " + policyName);
-                System.out.println("Remaining NULL rows  : 0");
+                printVerificationOk(itemTypeName, policyName);
             } else {
                 throw new CliException("Unknown internal backfill action: " + action, 2);
             }
@@ -56,30 +55,23 @@ public final class BackfillMain {
             System.err.println("ERROR: " + e.getMessage());
             rc = e.exitCode;
         } catch (SQLException e) {
-            System.err.println("DB2 ERROR");
-            System.err.println("Message:    " + e.getMessage());
-            System.err.println("SQL state:  " + e.getSQLState());
-            System.err.println("Error code: " + e.getErrorCode());
+            printSqlException(e);
             rc = 3;
         } catch (DKException e) {
-            System.err.println("IBM CM ERROR");
-            System.err.println("Name:        " + e.name());
-            System.err.println("Message:     " + e.getMessage());
-            System.err.println("Message ID:  " + e.getErrorId());
-            System.err.println("Error state: " + e.errorState());
-            System.err.println("Error code:  " + e.errorCode());
+            printDkException(e);
             rc = 3;
         } catch (Exception e) {
             System.err.println("ERROR: " + safeMessage(e));
             if (Boolean.parseBoolean(System.getenv("CM_DEBUG"))) e.printStackTrace(System.err);
             rc = 3;
         } finally {
+            if (backfill != null) backfill.closeQuietly();
             if (cm != null) cm.closeQuietly();
         }
         if (rc != 0) System.exit(rc);
     }
 
-    private static void validatePlan(BackfillPlan plan) {
+    static void validatePlan(BackfillPlan plan) {
         validateSegment(plan);
         if (plan.missingCreateTimestampRows > 0) {
             throw new CliException("Backfill refused: " + plan.missingCreateTimestampRows
@@ -87,7 +79,7 @@ public final class BackfillMain {
         }
     }
 
-    private static void validateSegment(BackfillPlan plan) {
+    static void validateSegment(BackfillPlan plan) {
         if (plan.segmentId != 1) {
             throw new CliException("Backfill refused: ItemType uses component SegmentID "
                     + plan.segmentId + ". Multi-segment backfill is not implemented; refusing"
@@ -95,7 +87,7 @@ public final class BackfillMain {
         }
     }
 
-    private static void printPlan(BackfillPlan plan) {
+    static void printPlan(BackfillPlan plan) {
         System.out.println("Existing-item backfill plan\n");
         System.out.println("Item type                 : " + plan.itemTypeName);
         System.out.println("Current policy            : " + CmService.emptyAsDash(plan.currentPolicy));
@@ -118,7 +110,7 @@ public final class BackfillMain {
         System.out.println("Only rows where ICM$RETENTIONDATE and ICM$AUTODELETEDATE are both NULL are changed.");
     }
 
-    private static void printApplyHeader(BackfillPlan plan) {
+    static void printApplyHeader(BackfillPlan plan) {
         System.out.println("Applying existing-item backfill");
         System.out.println("  Item type : " + plan.itemTypeName);
         System.out.println("  Table     : " + plan.tableName);
@@ -126,7 +118,29 @@ public final class BackfillMain {
         System.out.println("  Eligible  : " + plan.fillableRows);
     }
 
-    private static String safeMessage(Throwable throwable) {
+    static void printVerificationOk(String itemTypeName, String policyName) {
+        System.out.println("Backfill verification: OK");
+        System.out.println("Policy assignment    : " + itemTypeName + " -> " + policyName);
+        System.out.println("Remaining NULL rows  : 0");
+    }
+
+    static void printSqlException(SQLException e) {
+        System.err.println("DB2 ERROR");
+        System.err.println("Message:    " + e.getMessage());
+        System.err.println("SQL state:  " + e.getSQLState());
+        System.err.println("Error code: " + e.getErrorCode());
+    }
+
+    static void printDkException(DKException e) {
+        System.err.println("IBM CM ERROR");
+        System.err.println("Name:        " + e.name());
+        System.err.println("Message:     " + e.getMessage());
+        System.err.println("Message ID:  " + e.getErrorId());
+        System.err.println("Error state: " + e.errorState());
+        System.err.println("Error code:  " + e.errorCode());
+    }
+
+    static String safeMessage(Throwable throwable) {
         String message = throwable.getMessage();
         return message == null || message.trim().isEmpty()
                 ? throwable.getClass().getName() : message;
