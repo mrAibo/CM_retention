@@ -122,13 +122,13 @@ public final class SelfTestMain {
         assertTrue(db2.existsQuery("ICMADMIN.ICMUT01468001", "CREATETS IS NULL")
                 .endsWith("FETCH FIRST 1 ROW ONLY"), "DB2 exists syntax");
 
-        assertTrue("NUMTOYMINTERVAL(5, 'YEAR')".equals(
+        assertTrue("INTERVAL '5' YEAR".equals(
                 oracle.durationSql(5, DK_ICM_POLICY_TIME_UNIT.YEAR)), "Oracle year duration");
-        assertTrue("NUMTOYMINTERVAL(3, 'MONTH')".equals(
+        assertTrue("INTERVAL '3' MONTH".equals(
                 oracle.durationSql(3, DK_ICM_POLICY_TIME_UNIT.MONTH)), "Oracle month duration");
-        assertTrue("NUMTODSINTERVAL(14, 'DAY')".equals(
+        assertTrue("INTERVAL '14' DAY".equals(
                 oracle.durationSql(2, DK_ICM_POLICY_TIME_UNIT.WEEK)), "Oracle week duration");
-        assertTrue("NUMTODSINTERVAL(10, 'DAY')".equals(
+        assertTrue("INTERVAL '10' DAY".equals(
                 oracle.durationSql(10, DK_ICM_POLICY_TIME_UNIT.DAY)), "Oracle day duration");
         assertTrue(oracle.existsQuery("ICMADMIN.ICMUT01468001", "CREATETS IS NULL")
                 .contains("ROWNUM = 1"), "Oracle exists syntax");
@@ -138,11 +138,11 @@ public final class SelfTestMain {
                 "ICMADMIN.ICMUT01468001", oracleDuration, oracle.currentTimestampExpression());
         String oracleUpdate = BackfillService.buildUpdateSql(
                 "ICMADMIN.ICMUT01468001", oracleDuration);
-        assertTrue(oraclePlan.contains("CREATETS + NUMTOYMINTERVAL(5, 'YEAR')"),
+        assertTrue(oraclePlan.contains("CREATETS + INTERVAL '5' YEAR"),
                 "Oracle plan formula");
         assertTrue(oraclePlan.contains("CURRENT_TIMESTAMP"), "Oracle current timestamp syntax");
         assertTrue(oracleUpdate.contains(
-                "SET ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(5, 'YEAR')"),
+                "SET ICM$AUTODELETEDATE = CREATETS + INTERVAL '5' YEAR"),
                 "Oracle update formula");
     }
 
