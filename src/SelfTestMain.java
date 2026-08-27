@@ -23,6 +23,7 @@ public final class SelfTestMain {
         testBackfillSql();
         testBackfillDialects();
         testBatchWarningSummary();
+        testBatchFinalVerifierMatching();
         testTimingFormat();
         System.out.println("Self-test: OK (" + checks + " checks)");
     }
@@ -163,6 +164,17 @@ public final class SelfTestMain {
                 "batch warning list is compact");
         assertTrue("-".equals(BatchMain.formatWarningItems(Arrays.<String>asList(), 20)),
                 "empty batch warning list");
+    }
+
+    private static void testBatchFinalVerifierMatching() {
+        assertTrue(BatchVerifyMain.samePolicy(null, null), "unassigned state matches");
+        assertTrue(BatchVerifyMain.samePolicy(null, ""), "blank policy normalizes to unassigned");
+        assertTrue(BatchVerifyMain.samePolicy("AUTO_DELETE_1Y", "AUTO_DELETE_1Y"),
+                "assigned policy state matches");
+        assertTrue(!BatchVerifyMain.samePolicy(null, "AUTO_DELETE_1Y"),
+                "assigned policy does not match unassign target");
+        assertTrue(!BatchVerifyMain.samePolicy("AUTO_DELETE_1Y", "AUTO_DELETE_5Y"),
+                "different policy does not match assign target");
     }
 
     private static void testTimingFormat() {
