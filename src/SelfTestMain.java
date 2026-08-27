@@ -3,6 +3,7 @@ import com.ibm.mm.sdk.common.DKRetentionPolicyDefICM.DK_ICM_POLICY_TIME_UNIT;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.util.Arrays;
 
 /** Pure regression checks: no CM login and no direct database connection are performed. */
@@ -22,6 +23,7 @@ public final class SelfTestMain {
         testFingerprints();
         testBackfillSql();
         testBackfillDialects();
+        testDb2Chunking();
         testBatchWarningSummary();
         testBatchFinalVerifierMatching();
         testTimingFormat();
@@ -156,6 +158,23 @@ public final class SelfTestMain {
             tooLargeRejected = e.exitCode == 5;
         }
         assertTrue(tooLargeRejected, "Oracle interval precision overflow refused");
+    }
+
+    private static void testDb2Chunking() {
+        String base = BackfillService.buildUpdateSql("ICMADMIN.ICMUT01312001", "1 YEAR");
+        String chunk = Db2ChunkedBackfill.buildChunkUpdateSql(base, 250000);
+        assertTrue(chunk.endsWith("FETCH FIRST 250000 ROWS ONLY"),
+                "DB2 chunk uses searched-update FETCH FIRST");
+        assertTrue(Db2ChunkedBackfill.initialChunkRows(7825665L) == 250000,
+                "large DB2 backfill starts at bounded chunk size");
+        assertTrue(Db2ChunkedBackfill.initialChunkRows(50000L) == 50000,
+                "medium DB2 backfill starts at planned size");
+        assertTrue(Db2ChunkedBackfill.isTransactionLogFull(
+                new SQLException("transaction log full", "57011", -964)),
+                "SQL0964C recognized for adaptive retry");
+        assertTrue(!Db2ChunkedBackfill.isTransactionLogFull(
+                new SQLException("other resource", "57011", -999)),
+                "generic 57011 is not mistaken for SQL0964C");
     }
 
     private static void testBatchWarningSummary() {
