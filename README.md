@@ -2,7 +2,7 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.4.1**
+Current version: **0.4.2**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no direct document-delete command.
 
@@ -47,6 +47,8 @@ The expiration/retention semantics are identical; only the automatic-delete sche
 - direct backfill against DB2 or Oracle
 - Policy/Root fingerprints around database/CM transaction boundaries
 - verified-warning continuation for IBM CM secondary errors in batch mode
+- independent post-batch final verification in a second JVM/fresh CM session
+- automatic batch audit logs and confirmed-mismatch retry files
 - phase and ItemType timings
 - pure `selftest` regression checks
 - runtime tarball for hosts without Git or `javac`
@@ -213,16 +215,16 @@ Build on a compatible CM 8.7 host:
 
 The build compiles all Java sources and runs `SelfTestMain` before creating artifacts. The self-test loads IBM CM SDK classes but does **not** log in to Content Manager and does **not** open a DB2/Oracle JDBC connection.
 
-Version 0.4.1 produces:
+Version 0.4.2 produces:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.4.1.jar
+build/cm-retention-0.4.2.jar
 build/.version
 build/ret-policy.properties
 build/profiles/*.properties
-build/cm-retention-0.4.1-runtime.tar.gz
-build/SHA256SUMS-0.4.1
+build/cm-retention-0.4.2-runtime.tar.gz
+build/SHA256SUMS-0.4.2
 ```
 
 Verify:
@@ -237,8 +239,8 @@ bin/cm-retention doctor
 Expected version:
 
 ```text
-0.4.1
-cm-retention 0.4.1
+0.4.2
+cm-retention 0.4.2
 ```
 
 The runtime bundle contains no IBM SDK, JDBC driver, or credentials.
@@ -426,7 +428,7 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-The complete file workflow runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates every ItemType before the first mutation. Phase 2 remains sequential and non-atomic.
+The complete mutation phase runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates every ItemType before the first mutation. Phase 2 remains sequential and non-atomic.
 
 ## Verified secondary IBM CM warnings in 0.4.1
 
@@ -437,7 +439,7 @@ DGL0303A: Invalid parameter
 DKAttrDefICM::getViewOperator() opCode : [-1]
 ```
 
-`CmService` already reconnects and verifies the requested persisted state before raising `OperationWarning`. Starting with 0.4.1, batch mode treats that state separately from a real failure:
+`CmService` reconnects and verifies the requested persisted state before raising `OperationWarning`. Starting with 0.4.1, batch mode treats that state separately from a real failure:
 
 ```text
 clean success     -> continue
@@ -445,19 +447,79 @@ verified warning  -> report, continue, final RC 6
 real/uncertain failure -> stop immediately
 ```
 
-Example final summary:
+Example Phase-2 summary:
 
 ```text
 Batch complete: 217/217 item types reached a verified final state.
 Clean success     : 180
 Verified warnings : 37
 Warning itemtypes : AM, ...
-Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.
 ```
 
-The warning list is capped in the final summary so large legacy environments do not produce another huge block; each warning is still printed at the ItemType where it occurred.
+The warning list is capped in the Phase-2 summary so large legacy environments do not produce another huge block; each warning is still printed at the ItemType where it occurred.
 
-For `--file --backfill`, continuation is allowed only when the secondary assignment warning is followed by a successful complete final Policy/Root/assignment/residual-NULL verification. A backfill RC6 whose final state is uncertain still stops the batch immediately.
+For `--file --backfill`, continuation is allowed only when the secondary assignment warning is followed by a successful complete final Policy/Root/assignment/residual-NULL verification. A backfill RC6 whose final state is uncertain still stops the mutation batch immediately.
+
+## Independent final verifier and audit log in 0.4.2
+
+Every `--file` invocation now gets its own audit log. By default it is written below:
+
+```text
+<application-home>/logs/
+```
+
+The location can be overridden in `.env`:
+
+```dotenv
+CM_RETENTION_LOG_DIR=/var/log/cm-retention
+```
+
+The log directory is restricted to the runtime user and each log records the version, timestamp, user/host, exact command, selected `.env` path, complete batch output, verifier output and final return-code summary. Credentials are not written to the log.
+
+For a real write batch, after Phase 2 has started the launcher starts **a second Java process** (`BatchVerifyMain`). That process creates a new CM session and rereads every exact ItemType from the original file. It does not reuse the mutation JVM or its metadata/session cache.
+
+Expected state:
+
+```text
+unassign --file ...          -> Retention policy must be empty
+assign --file ... POLICY     -> Retention policy must equal POLICY exactly
+```
+
+Example:
+
+```text
+Phase 3/3: independent final verification
+  Runtime   : new JVM / fresh CM session
+  Operation : unassign
+  Expected  : -
+  Item types: 217
+
+Final verification summary
+  Verified OK         : 214
+  State mismatches    : 3
+  Verification errors : 0
+```
+
+If confirmed mismatches exist, the verifier prints each expected/actual state and automatically creates a `*-retry.txt` containing **only those confirmed mismatches**. The file can be used directly with the same batch command, for example:
+
+```bash
+bin/cm-retention unassign --file logs/cm-retention-batch-...-unassign-retry.txt --yes
+```
+
+If an ItemType cannot be read reliably because the SDK itself errors, its state is marked **unknown** and it is deliberately excluded from the retry file. This avoids blindly mutating an ItemType whose final state was not established.
+
+The independent verifier also runs after a mutation batch that stopped part-way through. This makes the log/retry file an exact view of what still differs from the requested end state instead of forcing the administrator to reconstruct the processed prefix manually.
+
+A dry-run, validation failure, or interactive cancellation before Phase 2 is logged but does not run the final verifier.
+
+Return-code combination:
+
+```text
+batch clean + verifier clean       -> 0
+batch clean + verifier not clean   -> 6
+verified secondary warning(s)      -> 6
+true mutation/runtime failure      -> original failure RC; verifier still reports current state
+```
 
 The backfill batch header reports the selected database, for example:
 
@@ -479,9 +541,9 @@ Batch mode (native Java runtime)
 | `3` | IBM CM / database runtime error |
 | `4` | ItemType or policy not found |
 | `5` | unsafe/conflicting operation refused before a relevant write |
-| `6` | verified IBM CM secondary warning, verification warning/failure, or partial-success state after persistence may have occurred |
+| `6` | verified IBM CM secondary warning, independent final-verifier mismatch/error, verification failure, or partial-success state after persistence may have occurred |
 
-A batch may therefore process its complete file and still return `6` when every requested state was verified but one or more IBM CM secondary warnings occurred. Scripts should inspect both the summary and the return code.
+A batch may therefore process its complete file and still return `6` when the requested final state was not independently clean or one or more verified IBM CM secondary warnings occurred. Scripts should inspect both the audit summary and the return code.
 
 ---
 
