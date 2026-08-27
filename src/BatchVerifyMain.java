@@ -29,11 +29,17 @@ public final class BatchVerifyMain {
     public static void main(String[] args) {
         int rc = 0;
         CmService cm = null;
+        BackfillService backfill = null;
         try {
             VerifyOptions options = VerifyOptions.parse(args);
             List<String> itemTypes = readItemTypes(options.file);
             BatchStop batchStop = readBatchStop(itemTypes);
-            cm = new CmService(Config.fromEnvironment());
+
+            Config base = Config.fromEnvironment();
+            cm = new CmService(base);
+            if (options.backfill) {
+                backfill = new BackfillService(BackfillConfig.from(base));
+            }
 
             // Fail early if a fresh independent CM session cannot be established.
             cm.datastore();
@@ -43,6 +49,7 @@ public final class BatchVerifyMain {
             System.out.println("  Runtime   : new JVM / fresh CM session");
             System.out.println("  Operation : " + options.command);
             System.out.println("  Expected  : " + CmService.emptyAsDash(options.expectedPolicy));
+            System.out.println("  Backfill  : " + (options.backfill ? "yes" : "no"));
             System.out.println("  Item types: " + itemTypes.size());
             if (batchStop != null) {
                 System.out.println("  Batch stop : " + batchStop.failedItemType
@@ -59,17 +66,30 @@ public final class BatchVerifyMain {
                 try {
                     DKItemTypeDefICM itemType = cm.requireItemType(itemTypeName);
                     String actual = CmService.normalizePolicy(itemType.getItemTypeRetentionPolicyName());
-                    if (samePolicy(options.expectedPolicy, actual)) {
-                        ok++;
-                    } else {
+                    if (!samePolicy(options.expectedPolicy, actual)) {
                         mismatches.add(new Mismatch(
-                                itemTypeName, actual, classifyMismatch(i, itemTypeName, batchStop)));
+                                itemTypeName, actual,
+                                classifyMismatch(i, itemTypeName, batchStop), -1L));
+                        continue;
                     }
+
+                    if (options.backfill) {
+                        long remaining = backfill.remainingMissingForIndependentVerification(
+                                itemType, actual, options.expectedPolicy);
+                        if (remaining != 0) {
+                            mismatches.add(new Mismatch(
+                                    itemTypeName, actual,
+                                    classifyMismatch(i, itemTypeName, batchStop), remaining));
+                            continue;
+                        }
+                    }
+                    ok++;
                 } catch (Exception e) {
                     errors.add(new VerifyError(itemTypeName, safeMessage(e)));
-                    // Do not let one broken SDK read poison verification of later
-                    // ItemTypes. Reconnect before the next exact read.
+                    // Do not let one broken SDK/DB read poison verification of
+                    // later ItemTypes. Reconnect before the next exact read.
                     cm.closeQuietly();
+                    if (backfill != null) backfill.closeQuietly();
                 }
             }
 
@@ -77,10 +97,14 @@ public final class BatchVerifyMain {
             int unattempted = countKind(mismatches, MismatchKind.UNATTEMPTED);
             int postWriteMismatch = countKind(mismatches, MismatchKind.POST_WRITE_MISMATCH);
             int unknownMismatch = countKind(mismatches, MismatchKind.UNKNOWN);
+            int backfillResiduals = countBackfillResiduals(mismatches);
 
             System.out.println("Final verification summary");
             System.out.println("  Verified OK         : " + ok);
             System.out.println("  State mismatches    : " + mismatches.size());
+            if (options.backfill) {
+                System.out.println("  Backfill residuals  : " + backfillResiduals);
+            }
             if (batchStop != null) {
                 System.out.println("    Failed at stop    : " + failedAtStop);
                 System.out.println("    Not attempted     : " + unattempted);
@@ -100,10 +124,10 @@ public final class BatchVerifyMain {
                     printMismatchGroup("Not attempted because the batch is fail-fast:",
                             mismatches, MismatchKind.UNATTEMPTED, options.expectedPolicy);
                 } else {
-                    printMismatchGroup("Confirmed state mismatches:",
+                    printMismatchGroup("Confirmed state/backfill mismatches:",
                             mismatches, MismatchKind.UNKNOWN, options.expectedPolicy);
                 }
-                writeRetryFile(mismatches);
+                writeRetryFile(mismatches, options.backfill);
             }
 
             if (!errors.isEmpty()) {
@@ -139,6 +163,7 @@ public final class BatchVerifyMain {
             }
             rc = 3;
         } finally {
+            if (backfill != null) backfill.closeQuietly();
             if (cm != null) cm.closeQuietly();
         }
         if (rc != 0) System.exit(rc);
@@ -213,6 +238,14 @@ public final class BatchVerifyMain {
         return count;
     }
 
+    private static int countBackfillResiduals(List<Mismatch> mismatches) {
+        int count = 0;
+        for (Mismatch mismatch : mismatches) {
+            if (mismatch.remainingRows >= 0) count++;
+        }
+        return count;
+    }
+
     private static void printMismatchGroup(String title,
                                            List<Mismatch> mismatches,
                                            MismatchKind kind,
@@ -227,9 +260,12 @@ public final class BatchVerifyMain {
         int shown = Math.min(selected.size(), DISPLAY_LIMIT);
         for (int i = 0; i < shown; i++) {
             Mismatch mismatch = selected.get(i);
+            String suffix = mismatch.remainingRows >= 0
+                    ? " remaining-null=" + mismatch.remainingRows : "";
             System.out.println("  - " + mismatch.itemTypeName
                     + " expected=" + CmService.emptyAsDash(expectedPolicy)
-                    + " actual=" + CmService.emptyAsDash(mismatch.actualPolicy));
+                    + " actual=" + CmService.emptyAsDash(mismatch.actualPolicy)
+                    + suffix);
         }
         if (selected.size() > shown) {
             System.out.println("  ... (+" + (selected.size() - shown)
@@ -238,7 +274,7 @@ public final class BatchVerifyMain {
         System.out.println();
     }
 
-    private static void writeRetryFile(List<Mismatch> mismatches) throws Exception {
+    private static void writeRetryFile(List<Mismatch> mismatches, boolean backfill) throws Exception {
         String value = System.getenv("CM_RETENTION_RETRY_FILE");
         if (value == null || value.trim().isEmpty() || mismatches.isEmpty()) return;
 
@@ -248,7 +284,8 @@ public final class BatchVerifyMain {
 
         List<String> lines = new ArrayList<String>();
         lines.add("# Generated by cm-retention final verifier");
-        lines.add("# Contains every confirmed state mismatch that still needs the requested final state.");
+        lines.add("# Contains every confirmed mismatch that still needs the requested final state"
+                + (backfill ? " and/or complete backfill." : "."));
         lines.add("# Verification errors are intentionally excluded because their state is unknown.");
         for (Mismatch mismatch : mismatches) {
             lines.add(mismatch.itemTypeName);
@@ -310,11 +347,16 @@ public final class BatchVerifyMain {
         final String itemTypeName;
         final String actualPolicy;
         final MismatchKind kind;
+        final long remainingRows;
 
-        Mismatch(String itemTypeName, String actualPolicy, MismatchKind kind) {
+        Mismatch(String itemTypeName,
+                 String actualPolicy,
+                 MismatchKind kind,
+                 long remainingRows) {
             this.itemTypeName = itemTypeName;
             this.actualPolicy = actualPolicy;
             this.kind = kind;
+            this.remainingRows = remainingRows;
         }
     }
 
@@ -332,11 +374,13 @@ public final class BatchVerifyMain {
         final String command;
         final Path file;
         final String expectedPolicy;
+        final boolean backfill;
 
-        VerifyOptions(String command, Path file, String expectedPolicy) {
+        VerifyOptions(String command, Path file, String expectedPolicy, boolean backfill) {
             this.command = command;
             this.file = file;
             this.expectedPolicy = expectedPolicy;
+            this.backfill = backfill;
         }
 
         static VerifyOptions parse(String[] args) {
@@ -349,6 +393,7 @@ public final class BatchVerifyMain {
             }
 
             String fileValue = null;
+            boolean backfill = false;
             List<String> positional = new ArrayList<String>();
             for (int i = 1; i < args.length; i++) {
                 String arg = args[i];
@@ -358,7 +403,10 @@ public final class BatchVerifyMain {
                         throw new CliException("--file requires a path", 2);
                     }
                     fileValue = args[++i];
-                } else if ("--yes".equals(arg) || "--dry-run".equals(arg) || "--backfill".equals(arg)) {
+                } else if ("--backfill".equals(arg)) {
+                    if (backfill) throw new CliException("Duplicate option --backfill", 2);
+                    backfill = true;
+                } else if ("--yes".equals(arg) || "--dry-run".equals(arg)) {
                     // Execution-only flags do not change the expected final policy state.
                 } else if (arg.startsWith("--")) {
                     throw new CliException("Unknown verifier batch option '" + arg + "'", 2);
@@ -377,11 +425,16 @@ public final class BatchVerifyMain {
                     throw new CliException("assign final verification requires exactly one policy name", 2);
                 }
                 expectedPolicy = positional.get(0);
-            } else if (!positional.isEmpty()) {
-                throw new CliException("unassign final verification does not accept a policy name", 2);
+            } else {
+                if (backfill) {
+                    throw new CliException("unassign final verification does not support --backfill", 2);
+                }
+                if (!positional.isEmpty()) {
+                    throw new CliException("unassign final verification does not accept a policy name", 2);
+                }
             }
 
-            return new VerifyOptions(command, Paths.get(fileValue), expectedPolicy);
+            return new VerifyOptions(command, Paths.get(fileValue), expectedPolicy, backfill);
         }
     }
 }
