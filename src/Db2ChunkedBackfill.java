@@ -13,8 +13,9 @@ import java.sql.Statement;
  * are identical to the normal backfill, so a retry is idempotent.
  */
 final class Db2ChunkedBackfill {
+    static final int CHUNKING_THRESHOLD_ROWS = 10000;
     static final int DEFAULT_CHUNK_ROWS = 250000;
-    static final int MIN_CHUNK_ROWS = 10000;
+    static final int MIN_CHUNK_ROWS = 1000;
 
     interface CommitGuard {
         void verify(long committedRows) throws Exception;
@@ -24,7 +25,7 @@ final class Db2ChunkedBackfill {
 
     static boolean shouldUse(BackfillService backfill, BackfillWritePlan plan) {
         return "DB2".equals(backfill.databaseDisplayName())
-                && plan.plannedFillableRows > MIN_CHUNK_ROWS;
+                && plan.plannedFillableRows > CHUNKING_THRESHOLD_ROWS;
     }
 
     static BackfillResult apply(BackfillWritePlan plan, CommitGuard guard) throws Exception {
