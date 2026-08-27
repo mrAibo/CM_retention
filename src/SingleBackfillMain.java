@@ -27,6 +27,7 @@ public final class SingleBackfillMain {
             DKRetentionPolicyDefICM policy = cm.requirePolicyFresh(options.policyName);
             ValidatedBackfill validated = BackfillWorkflow.validate(
                     backfill, itemType, policy, options.policyName);
+            System.out.println("Backfill database           : " + backfill.databaseDisplayName());
             BackfillMain.printPlan(validated.plan);
             System.out.println("Plan timing                : " + Timing.since(planStarted));
 
