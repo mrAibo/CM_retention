@@ -7,7 +7,7 @@ interface BackfillDialect {
     String jdbcPrefix();
     String[] driverClassNames();
     String driverJarHint();
-    String expirationExpression(String timestampColumn, int amount, DK_ICM_POLICY_TIME_UNIT unit);
+    String durationSql(int amount, DK_ICM_POLICY_TIME_UNIT unit);
     String currentTimestampExpression();
     String existsQuery(String qualifiedTable, String condition);
 }
@@ -53,11 +53,9 @@ final class Db2BackfillDialect implements BackfillDialect {
     public String driverJarHint() { return "db2jcc4.jar"; }
 
     @Override
-    public String expirationExpression(String timestampColumn,
-                                       int amount,
-                                       DK_ICM_POLICY_TIME_UNIT unit) {
+    public String durationSql(int amount, DK_ICM_POLICY_TIME_UNIT unit) {
         String sqlUnit = unit(unit);
-        return timestampColumn + " + " + amount + " " + sqlUnit + (amount == 1 ? "" : "S");
+        return amount + " " + sqlUnit + (amount == 1 ? "" : "S");
     }
 
     @Override
@@ -99,21 +97,19 @@ final class OracleBackfillDialect implements BackfillDialect {
     public String driverJarHint() { return "ojdbc8.jar"; }
 
     @Override
-    public String expirationExpression(String timestampColumn,
-                                       int amount,
-                                       DK_ICM_POLICY_TIME_UNIT unit) {
+    public String durationSql(int amount, DK_ICM_POLICY_TIME_UNIT unit) {
         if (unit == DK_ICM_POLICY_TIME_UNIT.YEAR) {
-            return timestampColumn + " + NUMTOYMINTERVAL(" + amount + ", 'YEAR')";
+            return "NUMTOYMINTERVAL(" + amount + ", 'YEAR')";
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.MONTH) {
-            return timestampColumn + " + NUMTOYMINTERVAL(" + amount + ", 'MONTH')";
+            return "NUMTOYMINTERVAL(" + amount + ", 'MONTH')";
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.WEEK) {
             long days = ((long) amount) * 7L;
-            return timestampColumn + " + NUMTODSINTERVAL(" + days + ", 'DAY')";
+            return "NUMTODSINTERVAL(" + days + ", 'DAY')";
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.DAY) {
-            return timestampColumn + " + NUMTODSINTERVAL(" + amount + ", 'DAY')";
+            return "NUMTODSINTERVAL(" + amount + ", 'DAY')";
         }
         throw new CliException("Unsupported expiration unit for Oracle backfill: " + unit, 5);
     }
