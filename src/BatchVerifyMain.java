@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Independent post-batch verifier.
@@ -18,6 +20,10 @@ import java.util.Set;
  * It therefore cannot reuse CmService/session/cache state from BatchMain.
  */
 public final class BatchVerifyMain {
+    private static final int DISPLAY_LIMIT = 20;
+    private static final Pattern STOP_PATTERN = Pattern.compile(
+            "ERROR: batch stopped at '([^']+)' after ([0-9]+) verified item\\(s\\).*");
+
     private BatchVerifyMain() { }
 
     public static void main(String[] args) {
@@ -26,6 +32,7 @@ public final class BatchVerifyMain {
         try {
             VerifyOptions options = VerifyOptions.parse(args);
             List<String> itemTypes = readItemTypes(options.file);
+            BatchStop batchStop = readBatchStop(itemTypes);
             cm = new CmService(Config.fromEnvironment());
 
             // Fail early if a fresh independent CM session cannot be established.
@@ -37,20 +44,26 @@ public final class BatchVerifyMain {
             System.out.println("  Operation : " + options.command);
             System.out.println("  Expected  : " + CmService.emptyAsDash(options.expectedPolicy));
             System.out.println("  Item types: " + itemTypes.size());
+            if (batchStop != null) {
+                System.out.println("  Batch stop : " + batchStop.failedItemType
+                        + " after " + batchStop.verifiedBeforeStop + " verified item(s)");
+            }
             System.out.println();
 
             int ok = 0;
             List<Mismatch> mismatches = new ArrayList<Mismatch>();
             List<VerifyError> errors = new ArrayList<VerifyError>();
 
-            for (String itemTypeName : itemTypes) {
+            for (int i = 0; i < itemTypes.size(); i++) {
+                String itemTypeName = itemTypes.get(i);
                 try {
                     DKItemTypeDefICM itemType = cm.requireItemType(itemTypeName);
                     String actual = CmService.normalizePolicy(itemType.getItemTypeRetentionPolicyName());
                     if (samePolicy(options.expectedPolicy, actual)) {
                         ok++;
                     } else {
-                        mismatches.add(new Mismatch(itemTypeName, actual));
+                        mismatches.add(new Mismatch(
+                                itemTypeName, actual, classifyMismatch(i, itemTypeName, batchStop)));
                     }
                 } catch (Exception e) {
                     errors.add(new VerifyError(itemTypeName, safeMessage(e)));
@@ -60,18 +73,35 @@ public final class BatchVerifyMain {
                 }
             }
 
+            int failedAtStop = countKind(mismatches, MismatchKind.FAILED_AT_STOP);
+            int unattempted = countKind(mismatches, MismatchKind.UNATTEMPTED);
+            int postWriteMismatch = countKind(mismatches, MismatchKind.POST_WRITE_MISMATCH);
+            int unknownMismatch = countKind(mismatches, MismatchKind.UNKNOWN);
+
             System.out.println("Final verification summary");
             System.out.println("  Verified OK         : " + ok);
             System.out.println("  State mismatches    : " + mismatches.size());
+            if (batchStop != null) {
+                System.out.println("    Failed at stop    : " + failedAtStop);
+                System.out.println("    Not attempted     : " + unattempted);
+                System.out.println("    Post-write mismatch: " + postWriteMismatch);
+            } else if (unknownMismatch > 0) {
+                System.out.println("    Unclassified      : " + unknownMismatch);
+            }
             System.out.println("  Verification errors : " + errors.size());
 
             if (!mismatches.isEmpty()) {
                 System.out.println();
-                System.out.println("Confirmed state mismatches:");
-                for (Mismatch mismatch : mismatches) {
-                    System.out.println("  - " + mismatch.itemTypeName
-                            + " expected=" + CmService.emptyAsDash(options.expectedPolicy)
-                            + " actual=" + CmService.emptyAsDash(mismatch.actualPolicy));
+                if (batchStop != null) {
+                    printMismatchGroup("Failed item (batch stopped here):",
+                            mismatches, MismatchKind.FAILED_AT_STOP, options.expectedPolicy);
+                    printMismatchGroup("Unexpected mismatch among previously verified items:",
+                            mismatches, MismatchKind.POST_WRITE_MISMATCH, options.expectedPolicy);
+                    printMismatchGroup("Not attempted because the batch is fail-fast:",
+                            mismatches, MismatchKind.UNATTEMPTED, options.expectedPolicy);
+                } else {
+                    printMismatchGroup("Confirmed state mismatches:",
+                            mismatches, MismatchKind.UNKNOWN, options.expectedPolicy);
                 }
                 writeRetryFile(mismatches);
             }
@@ -79,8 +109,13 @@ public final class BatchVerifyMain {
             if (!errors.isEmpty()) {
                 System.out.println();
                 System.out.println("Verification errors (state unknown; not added to retry file):");
-                for (VerifyError error : errors) {
+                int shown = Math.min(errors.size(), DISPLAY_LIMIT);
+                for (int i = 0; i < shown; i++) {
+                    VerifyError error = errors.get(i);
                     System.out.println("  - " + error.itemTypeName + ": " + error.message);
+                }
+                if (errors.size() > shown) {
+                    System.out.println("  ... (+" + (errors.size() - shown) + " more)");
                 }
             }
 
@@ -115,6 +150,94 @@ public final class BatchVerifyMain {
         return left == null ? right == null : left.equals(right);
     }
 
+    static String mismatchKindForTest(int index, String itemTypeName,
+                                      int verifiedBeforeStop, String failedItemType) {
+        BatchStop stop = failedItemType == null ? null
+                : new BatchStop(failedItemType, verifiedBeforeStop);
+        return classifyMismatch(index, itemTypeName, stop).name();
+    }
+
+    private static MismatchKind classifyMismatch(int index,
+                                                 String itemTypeName,
+                                                 BatchStop stop) {
+        if (stop == null) return MismatchKind.UNKNOWN;
+        if (index < stop.verifiedBeforeStop) return MismatchKind.POST_WRITE_MISMATCH;
+        if (index == stop.verifiedBeforeStop && itemTypeName.equals(stop.failedItemType)) {
+            return MismatchKind.FAILED_AT_STOP;
+        }
+        if (index > stop.verifiedBeforeStop) return MismatchKind.UNATTEMPTED;
+        return MismatchKind.UNKNOWN;
+    }
+
+    private static BatchStop readBatchStop(List<String> itemTypes) {
+        String retryValue = System.getenv("CM_RETENTION_RETRY_FILE");
+        if (retryValue == null || retryValue.trim().isEmpty()) return null;
+        String retry = retryValue.trim();
+        if (!retry.endsWith("-retry.txt")) return null;
+
+        Path audit = Paths.get(retry.substring(0, retry.length() - "-retry.txt".length()) + ".log")
+                .toAbsolutePath().normalize();
+        if (!Files.isRegularFile(audit) || !Files.isReadable(audit)) return null;
+
+        BatchStop last = null;
+        try {
+            BufferedReader reader = Files.newBufferedReader(audit, StandardCharsets.UTF_8);
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Matcher matcher = STOP_PATTERN.matcher(line.trim());
+                    if (!matcher.matches()) continue;
+                    String failed = matcher.group(1);
+                    int verified = Integer.parseInt(matcher.group(2));
+                    if (verified >= 0 && verified < itemTypes.size()
+                            && failed.equals(itemTypes.get(verified))) {
+                        last = new BatchStop(failed, verified);
+                    }
+                }
+            } finally {
+                reader.close();
+            }
+        } catch (Exception ignored) {
+            // Classification metadata is supplemental. Verification itself must
+            // still run even if the audit log cannot be parsed.
+            return null;
+        }
+        return last;
+    }
+
+    private static int countKind(List<Mismatch> mismatches, MismatchKind kind) {
+        int count = 0;
+        for (Mismatch mismatch : mismatches) {
+            if (mismatch.kind == kind) count++;
+        }
+        return count;
+    }
+
+    private static void printMismatchGroup(String title,
+                                           List<Mismatch> mismatches,
+                                           MismatchKind kind,
+                                           String expectedPolicy) {
+        List<Mismatch> selected = new ArrayList<Mismatch>();
+        for (Mismatch mismatch : mismatches) {
+            if (mismatch.kind == kind) selected.add(mismatch);
+        }
+        if (selected.isEmpty()) return;
+
+        System.out.println(title + " " + selected.size());
+        int shown = Math.min(selected.size(), DISPLAY_LIMIT);
+        for (int i = 0; i < shown; i++) {
+            Mismatch mismatch = selected.get(i);
+            System.out.println("  - " + mismatch.itemTypeName
+                    + " expected=" + CmService.emptyAsDash(expectedPolicy)
+                    + " actual=" + CmService.emptyAsDash(mismatch.actualPolicy));
+        }
+        if (selected.size() > shown) {
+            System.out.println("  ... (+" + (selected.size() - shown)
+                    + " more; full list is in the retry file)");
+        }
+        System.out.println();
+    }
+
     private static void writeRetryFile(List<Mismatch> mismatches) throws Exception {
         String value = System.getenv("CM_RETENTION_RETRY_FILE");
         if (value == null || value.trim().isEmpty() || mismatches.isEmpty()) return;
@@ -125,7 +248,8 @@ public final class BatchVerifyMain {
 
         List<String> lines = new ArrayList<String>();
         lines.add("# Generated by cm-retention final verifier");
-        lines.add("# Contains confirmed state mismatches only; verification errors are intentionally excluded.");
+        lines.add("# Contains every confirmed state mismatch that still needs the requested final state.");
+        lines.add("# Verification errors are intentionally excluded because their state is unknown.");
         for (Mismatch mismatch : mismatches) {
             lines.add(mismatch.itemTypeName);
         }
@@ -165,13 +289,32 @@ public final class BatchVerifyMain {
         return message == null || message.trim().isEmpty() ? e.getClass().getName() : message;
     }
 
+    private enum MismatchKind {
+        FAILED_AT_STOP,
+        UNATTEMPTED,
+        POST_WRITE_MISMATCH,
+        UNKNOWN
+    }
+
+    private static final class BatchStop {
+        final String failedItemType;
+        final int verifiedBeforeStop;
+
+        BatchStop(String failedItemType, int verifiedBeforeStop) {
+            this.failedItemType = failedItemType;
+            this.verifiedBeforeStop = verifiedBeforeStop;
+        }
+    }
+
     private static final class Mismatch {
         final String itemTypeName;
         final String actualPolicy;
+        final MismatchKind kind;
 
-        Mismatch(String itemTypeName, String actualPolicy) {
+        Mismatch(String itemTypeName, String actualPolicy, MismatchKind kind) {
             this.itemTypeName = itemTypeName;
             this.actualPolicy = actualPolicy;
+            this.kind = kind;
         }
     }
 
