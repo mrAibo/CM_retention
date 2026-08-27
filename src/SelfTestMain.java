@@ -1,9 +1,11 @@
+import com.ibm.mm.sdk.common.DKRetentionPolicyDefICM.DK_ICM_POLICY_TIME_UNIT;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 
-/** Pure regression checks: no CM login and no DB2 connection are performed. */
+/** Pure regression checks: no CM login and no direct database connection are performed. */
 public final class SelfTestMain {
     private static int checks;
 
@@ -19,6 +21,7 @@ public final class SelfTestMain {
         testTemplateDetection();
         testFingerprints();
         testBackfillSql();
+        testBackfillDialects();
         testTimingFormat();
         System.out.println("Self-test: OK (" + checks + " checks)");
     }
@@ -90,16 +93,57 @@ public final class SelfTestMain {
 
     private static void testBackfillSql() {
         String table = "ICMADMIN.ICMUT01468001";
-        String plan = BackfillService.buildPlanSql(table, "1 YEAR");
-        assertTrue(plan.contains("CREATETS + 1 YEAR"), "plan uses CREATETS");
+        BackfillDialect db2 = BackfillDialects.forType("db2");
+        String db2Duration = db2.durationSql(1, DK_ICM_POLICY_TIME_UNIT.YEAR);
+        String plan = BackfillService.buildPlanSql(
+                table, db2Duration, db2.currentTimestampExpression());
+        assertTrue(plan.contains("CREATETS + 1 YEAR"), "DB2 plan uses CREATETS");
+        assertTrue(plan.contains("CURRENT TIMESTAMP"), "DB2 current timestamp syntax");
         assertTrue(!plan.contains("ICM$CREATETS"), "plan rejects legacy wrong column");
         assertTrue(plan.contains("FROM " + table), "plan table");
 
-        String update = BackfillService.buildUpdateSql(table, "1 YEAR");
-        assertTrue(update.contains("SET ICM$AUTODELETEDATE = CREATETS + 1 YEAR"), "update formula");
+        String update = BackfillService.buildUpdateSql(table, db2Duration);
+        assertTrue(update.contains("SET ICM$AUTODELETEDATE = CREATETS + 1 YEAR"), "DB2 update formula");
         assertTrue(update.contains("ICM$RETENTIONDATE IS NULL"), "update retention guard");
         assertTrue(update.contains("ICM$AUTODELETEDATE IS NULL"), "update expiration guard");
         assertTrue(update.contains("CREATETS IS NOT NULL"), "update create timestamp guard");
+    }
+
+    private static void testBackfillDialects() {
+        BackfillDialect db2 = BackfillDialects.forType("db2");
+        BackfillDialect oracle = BackfillDialects.forType("oracle");
+
+        assertTrue("db2".equals(BackfillDialects.detectType("jdbc:db2:LSDB")), "detect DB2 JDBC");
+        assertTrue("oracle".equals(BackfillDialects.detectType(
+                "jdbc:oracle:thin:@//dbhost:1521/LSDB")), "detect Oracle JDBC");
+
+        assertTrue("2 YEARS".equals(db2.durationSql(2, DK_ICM_POLICY_TIME_UNIT.YEAR)),
+                "DB2 year duration");
+        assertTrue(db2.existsQuery("ICMADMIN.ICMUT01468001", "CREATETS IS NULL")
+                .endsWith("FETCH FIRST 1 ROW ONLY"), "DB2 exists syntax");
+
+        assertTrue("NUMTOYMINTERVAL(5, 'YEAR')".equals(
+                oracle.durationSql(5, DK_ICM_POLICY_TIME_UNIT.YEAR)), "Oracle year duration");
+        assertTrue("NUMTOYMINTERVAL(3, 'MONTH')".equals(
+                oracle.durationSql(3, DK_ICM_POLICY_TIME_UNIT.MONTH)), "Oracle month duration");
+        assertTrue("NUMTODSINTERVAL(14, 'DAY')".equals(
+                oracle.durationSql(2, DK_ICM_POLICY_TIME_UNIT.WEEK)), "Oracle week duration");
+        assertTrue("NUMTODSINTERVAL(10, 'DAY')".equals(
+                oracle.durationSql(10, DK_ICM_POLICY_TIME_UNIT.DAY)), "Oracle day duration");
+        assertTrue(oracle.existsQuery("ICMADMIN.ICMUT01468001", "CREATETS IS NULL")
+                .contains("ROWNUM = 1"), "Oracle exists syntax");
+
+        String oracleDuration = oracle.durationSql(5, DK_ICM_POLICY_TIME_UNIT.YEAR);
+        String oraclePlan = BackfillService.buildPlanSql(
+                "ICMADMIN.ICMUT01468001", oracleDuration, oracle.currentTimestampExpression());
+        String oracleUpdate = BackfillService.buildUpdateSql(
+                "ICMADMIN.ICMUT01468001", oracleDuration);
+        assertTrue(oraclePlan.contains("CREATETS + NUMTOYMINTERVAL(5, 'YEAR')"),
+                "Oracle plan formula");
+        assertTrue(oraclePlan.contains("CURRENT_TIMESTAMP"), "Oracle current timestamp syntax");
+        assertTrue(oracleUpdate.contains(
+                "SET ICM$AUTODELETEDATE = CREATETS + NUMTOYMINTERVAL(5, 'YEAR')"),
+                "Oracle update formula");
     }
 
     private static void testTimingFormat() {
