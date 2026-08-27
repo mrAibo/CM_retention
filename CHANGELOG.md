@@ -2,6 +2,22 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.4.1
+
+Verified-warning batch hardening for IBM CM 8.7 legacy metadata cases:
+
+- `assign --file` and `unassign --file` no longer stop when IBM CM reports a secondary `OperationWarning` after the requested persisted state has already been confirmed by reconnect verification
+- the observed `DGL0303A: DKAttrDefICM::getViewOperator() opCode : [-1]` case is therefore reported per ItemType and the batch continues to later ItemTypes instead of requiring one restart per legacy ItemType
+- true runtime failures, stale-state failures, and any condition where the requested final state cannot be verified remain fail-fast
+- batch output distinguishes `clean success`, `verified warnings`, and real failures; warning ItemTypes are summarized compactly
+- a batch that reaches the requested final state for every ItemType but encounters one or more verified secondary IBM CM errors completes the full file and returns exit code `6`
+- `--file --backfill` uses the same rule only when the assignment warning is followed by a successful final Policy/Root/assignment/residual-NULL verification; otherwise it still stops with exit `6`
+- single-item assign/unassign/backfill behavior remains conservative: a verified secondary IBM CM warning still returns exit `6`
+- no automatic SQL repair of `ICMSTCOMPVIEWATTRS.VIEWOPERATOR=-1` was introduced; internal CM metadata repair remains a separate controlled maintenance task
+- operational guidance now treats changes to an already-assigned AUTO_DELETE policy (especially its schedule) conservatively: use controlled unassign/reassign or a new policy so per-ItemType automatic-delete tasks are rebuilt consistently
+- self-test now covers compact batch-warning summary formatting
+- bumped runtime/package version to `0.4.1`
+
 ## 0.4.0
 
 Database-neutral existing-item backfill with Oracle support:
