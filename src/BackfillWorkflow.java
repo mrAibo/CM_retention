@@ -41,26 +41,8 @@ final class BackfillWorkflow {
         long dbStarted = Timing.start();
         BackfillResult result;
         if (Db2ChunkedBackfill.shouldUse(backfill, writePlan)) {
-            result = Db2ChunkedBackfill.apply(backfill, writePlan, new Db2ChunkedBackfill.CommitGuard() {
-                @Override
-                public void verify(long committedRows) throws Exception {
-                    cm.closeQuietly();
-                    DKItemTypeDefICM chunkItem = cm.requireItemType(validated.itemTypeName);
-                    String chunkCurrent = CmService.normalizePolicy(
-                            chunkItem.getItemTypeRetentionPolicyName());
-                    requireExpectedAssignmentState(
-                            validated, chunkCurrent, 6,
-                            "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)");
-
-                    DKRetentionPolicyDefICM chunkPolicy = cm.requirePolicyFresh(validated.policyName);
-                    validated.plan.policyFingerprint.requireSame(
-                            PolicyFingerprint.from(chunkPolicy),
-                            "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)", 6);
-                    backfill.requireRootUnchanged(
-                            chunkItem, validated.plan.rootFingerprint,
-                            "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)", 6);
-                }
-            });
+            result = Db2ChunkedBackfill.apply(backfill, writePlan,
+                    preAssignmentCommitGuard(cm, backfill, validated));
         } else {
             result = backfill.apply(writePlan);
         }
@@ -119,20 +101,7 @@ final class BackfillWorkflow {
         Exception verificationProblem = null;
         long verifyStarted = Timing.start();
         try {
-            cm.closeQuietly();
-            DKItemTypeDefICM freshItem = cm.requireItemType(validated.itemTypeName);
-            DKRetentionPolicyDefICM freshPolicy = cm.requirePolicyFresh(validated.policyName);
-            validated.plan.policyFingerprint.requireSame(
-                    PolicyFingerprint.from(freshPolicy), "during final verification", 6);
-
-            String persisted = CmService.normalizePolicy(freshItem.getItemTypeRetentionPolicyName());
-            long remaining = backfill.remainingMissing(
-                    freshItem, validated.plan.rootFingerprint, persisted, validated.policyName);
-            if (remaining != 0) {
-                throw new CliException("Backfill verification failed: " + remaining
-                        + " row(s) still have NULL retention/auto-delete metadata.", 6);
-            }
-            BackfillMain.printVerificationOk(validated.itemTypeName, validated.policyName);
+            finalVerifyAndCatchUp(cm, backfill, validated);
         } catch (Exception e) {
             verificationProblem = e;
             printEmbeddedProblem("Final verification", e);
@@ -159,6 +128,107 @@ final class BackfillWorkflow {
         if (assignmentProblem instanceof OperationWarning) {
             throw (OperationWarning) assignmentProblem;
         }
+    }
+
+    private static Db2ChunkedBackfill.CommitGuard preAssignmentCommitGuard(
+            final CmService cm,
+            final BackfillService backfill,
+            final ValidatedBackfill validated) {
+        return new Db2ChunkedBackfill.CommitGuard() {
+            @Override
+            public void verify(long committedRows) throws Exception {
+                cm.closeQuietly();
+                DKItemTypeDefICM chunkItem = cm.requireItemType(validated.itemTypeName);
+                String chunkCurrent = CmService.normalizePolicy(
+                        chunkItem.getItemTypeRetentionPolicyName());
+                requireExpectedAssignmentState(
+                        validated, chunkCurrent, 6,
+                        "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)");
+
+                DKRetentionPolicyDefICM chunkPolicy = cm.requirePolicyFresh(validated.policyName);
+                validated.plan.policyFingerprint.requireSame(
+                        PolicyFingerprint.from(chunkPolicy),
+                        "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)", 6);
+                backfill.requireRootUnchanged(
+                        chunkItem, validated.plan.rootFingerprint,
+                        "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)", 6);
+            }
+        };
+    }
+
+    private static Db2ChunkedBackfill.CommitGuard postAssignmentCommitGuard(
+            final CmService cm,
+            final BackfillService backfill,
+            final ValidatedBackfill validated) {
+        return new Db2ChunkedBackfill.CommitGuard() {
+            @Override
+            public void verify(long committedRows) throws Exception {
+                cm.closeQuietly();
+                DKItemTypeDefICM chunkItem = cm.requireItemType(validated.itemTypeName);
+                String chunkCurrent = CmService.normalizePolicy(
+                        chunkItem.getItemTypeRetentionPolicyName());
+                if (!samePolicy(validated.policyName, chunkCurrent)) {
+                    throw new CliException("ItemType state changed during post-assignment catch-up: "
+                            + validated.itemTypeName + " now uses "
+                            + CmService.emptyAsDash(chunkCurrent) + " instead of "
+                            + validated.policyName + ".", 6);
+                }
+
+                DKRetentionPolicyDefICM chunkPolicy = cm.requirePolicyFresh(validated.policyName);
+                validated.plan.policyFingerprint.requireSame(
+                        PolicyFingerprint.from(chunkPolicy),
+                        "during post-assignment catch-up after " + committedRows + " row(s)", 6);
+                backfill.requireRootUnchanged(
+                        chunkItem, validated.plan.rootFingerprint,
+                        "during post-assignment catch-up after " + committedRows + " row(s)", 6);
+            }
+        };
+    }
+
+    private static void finalVerifyAndCatchUp(final CmService cm,
+                                              final BackfillService backfill,
+                                              final ValidatedBackfill validated) throws Exception {
+        cm.closeQuietly();
+        DKItemTypeDefICM freshItem = cm.requireItemType(validated.itemTypeName);
+        DKRetentionPolicyDefICM freshPolicy = cm.requirePolicyFresh(validated.policyName);
+        validated.plan.policyFingerprint.requireSame(
+                PolicyFingerprint.from(freshPolicy), "during final verification", 6);
+
+        String persisted = CmService.normalizePolicy(freshItem.getItemTypeRetentionPolicyName());
+        long remaining = backfill.remainingMissing(
+                freshItem, validated.plan.rootFingerprint, persisted, validated.policyName);
+
+        if (remaining != 0) {
+            System.out.println("Post-assignment catch-up");
+            System.out.println("  Residual NULL rows : " + remaining);
+            System.out.println("  Reason             : rows appeared during the final pre-assign/assign window");
+
+            BackfillWritePlan catchupPlan = backfill.prepareWrite(
+                    freshItem, freshPolicy, persisted, validated.policyName, validated.plan);
+            BackfillResult catchup;
+            if (Db2ChunkedBackfill.shouldUse(backfill, catchupPlan)) {
+                catchup = Db2ChunkedBackfill.apply(backfill, catchupPlan,
+                        postAssignmentCommitGuard(cm, backfill, validated));
+            } else {
+                catchup = backfill.apply(catchupPlan);
+            }
+            System.out.println("  Catch-up committed : " + catchup.updatedRows + " row(s)");
+
+            cm.closeQuietly();
+            freshItem = cm.requireItemType(validated.itemTypeName);
+            freshPolicy = cm.requirePolicyFresh(validated.policyName);
+            validated.plan.policyFingerprint.requireSame(
+                    PolicyFingerprint.from(freshPolicy), "after post-assignment catch-up", 6);
+            persisted = CmService.normalizePolicy(freshItem.getItemTypeRetentionPolicyName());
+            remaining = backfill.remainingMissing(
+                    freshItem, validated.plan.rootFingerprint, persisted, validated.policyName);
+        }
+
+        if (remaining != 0) {
+            throw new CliException("Backfill verification failed: " + remaining
+                    + " row(s) still have NULL retention/auto-delete metadata after catch-up.", 6);
+        }
+        BackfillMain.printVerificationOk(validated.itemTypeName, validated.policyName);
     }
 
     private static void printTiming(BackfillService backfill,
