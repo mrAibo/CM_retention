@@ -18,9 +18,9 @@ final class BackfillWorkflow {
         return new ValidatedBackfill(itemType.getName(), targetPolicy, current, plan);
     }
 
-    static void apply(CmService cm,
-                      BackfillService backfill,
-                      ValidatedBackfill validated) throws Exception {
+    static void apply(final CmService cm,
+                      final BackfillService backfill,
+                      final ValidatedBackfill validated) throws Exception {
         long totalStarted = Timing.start();
 
         long preflightStarted = Timing.start();
@@ -39,9 +39,31 @@ final class BackfillWorkflow {
 
         printApplyHeader(backfill, writePlan);
         long dbStarted = Timing.start();
-        BackfillResult result = Db2ChunkedBackfill.shouldUse(backfill, writePlan)
-                ? Db2ChunkedBackfill.apply(writePlan)
-                : backfill.apply(writePlan);
+        BackfillResult result;
+        if (Db2ChunkedBackfill.shouldUse(backfill, writePlan)) {
+            result = Db2ChunkedBackfill.apply(writePlan, new Db2ChunkedBackfill.CommitGuard() {
+                @Override
+                public void verify(long committedRows) throws Exception {
+                    cm.closeQuietly();
+                    DKItemTypeDefICM chunkItem = cm.requireItemType(validated.itemTypeName);
+                    String chunkCurrent = CmService.normalizePolicy(
+                            chunkItem.getItemTypeRetentionPolicyName());
+                    requireExpectedAssignmentState(
+                            validated, chunkCurrent, 6,
+                            "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)");
+
+                    DKRetentionPolicyDefICM chunkPolicy = cm.requirePolicyFresh(validated.policyName);
+                    validated.plan.policyFingerprint.requireSame(
+                            PolicyFingerprint.from(chunkPolicy),
+                            "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)", 6);
+                    backfill.requireRootUnchanged(
+                            chunkItem, validated.plan.rootFingerprint,
+                            "after DB2 chunk COMMIT (" + committedRows + " row(s) committed)", 6);
+                }
+            });
+        } else {
+            result = backfill.apply(writePlan);
+        }
         long dbNanos = Timing.elapsed(dbStarted);
         System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
         System.out.println("Remaining NULL rows: " + result.remainingRows);
