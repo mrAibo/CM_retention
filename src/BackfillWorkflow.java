@@ -26,26 +26,27 @@ final class BackfillWorkflow {
         long preflightStarted = Timing.start();
         DKItemTypeDefICM itemType = cm.requireItemType(validated.itemTypeName);
         String current = CmService.normalizePolicy(itemType.getItemTypeRetentionPolicyName());
-        requireExpectedAssignmentState(validated, current, 5, "after validation and before DB2 backfill");
+        requireExpectedAssignmentState(validated, current, 5,
+                "after validation and before database backfill");
 
         DKRetentionPolicyDefICM policy = cm.requirePolicyFresh(validated.policyName);
         validated.plan.policyFingerprint.requireSame(
-                PolicyFingerprint.from(policy), "after validation and before DB2 backfill", 5);
+                PolicyFingerprint.from(policy), "after validation and before database backfill", 5);
 
         BackfillWritePlan writePlan = backfill.prepareWrite(
                 itemType, policy, current, validated.policyName, validated.plan);
         long preflightNanos = Timing.elapsed(preflightStarted);
 
-        printApplyHeader(writePlan);
+        printApplyHeader(backfill, writePlan);
         long dbStarted = Timing.start();
         BackfillResult result = backfill.apply(writePlan);
         long dbNanos = Timing.elapsed(dbStarted);
         System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
         System.out.println("Remaining NULL rows: " + result.remainingRows);
 
-        // After a DB2 mutation, any newly detected stale state is a partial-
-        // success condition. If zero rows changed, no DB2 data was modified and
-        // a normal stale-plan refusal (5) remains accurate.
+        // After a database mutation, any newly detected stale state is a partial-
+        // success condition. If zero rows changed, no database data was modified
+        // and a normal stale-plan refusal (5) remains accurate.
         int postBackfillExit = result.changedRows() ? 6 : 5;
 
         long guardStarted = Timing.start();
@@ -57,21 +58,21 @@ final class BackfillWorkflow {
             preAssignCurrent = CmService.normalizePolicy(preAssignItem.getItemTypeRetentionPolicyName());
             requireExpectedAssignmentState(
                     validated, preAssignCurrent, postBackfillExit,
-                    "after DB2 COMMIT and before policy assignment");
+                    "after database COMMIT and before policy assignment");
 
             DKRetentionPolicyDefICM preAssignPolicy = cm.requirePolicyFresh(validated.policyName);
             validated.plan.policyFingerprint.requireSame(
                     PolicyFingerprint.from(preAssignPolicy),
-                    "after DB2 COMMIT and before policy assignment", postBackfillExit);
+                    "after database COMMIT and before policy assignment", postBackfillExit);
             backfill.requireRootUnchanged(
                     preAssignItem, validated.plan.rootFingerprint,
-                    "after DB2 COMMIT and before policy assignment", postBackfillExit);
+                    "after database COMMIT and before policy assignment", postBackfillExit);
         } catch (Exception e) {
             if (result.changedRows()) {
                 printEmbeddedProblem("Post-commit safety guard", e);
                 throw new CliException("Backfill was committed for " + validated.itemTypeName
                         + ", but the post-commit safety guard failed. Policy assignment was not started."
-                        + " Review the ItemType, policy and DB2 state before retrying.", 6);
+                        + " Review the ItemType, policy and database state before retrying.", 6);
             }
             throw e;
         }
@@ -120,11 +121,11 @@ final class BackfillWorkflow {
         if (assignmentProblem != null || verificationProblem != null) {
             throw new CliException("Backfill phase completed for " + validated.itemTypeName
                     + ", but assignment/final verification was not a clean success."
-                    + " Review the ItemType and DB2 state before retrying.", 6);
+                    + " Review the ItemType and database state before retrying.", 6);
         }
 
         System.out.println("Timing                    : preflight " + Timing.format(preflightNanos)
-                + " / DB2 " + Timing.format(dbNanos)
+                + " / " + backfill.databaseDisplayName() + " " + Timing.format(dbNanos)
                 + " / post-commit guard " + Timing.format(guardNanos)
                 + " / CM " + Timing.format(cmNanos)
                 + " / verify " + Timing.format(verifyNanos)
@@ -143,8 +144,9 @@ final class BackfillWorkflow {
         }
     }
 
-    private static void printApplyHeader(BackfillWritePlan plan) {
+    private static void printApplyHeader(BackfillService backfill, BackfillWritePlan plan) {
         System.out.println("Applying existing-item backfill");
+        System.out.println("  Database         : " + backfill.databaseDisplayName());
         System.out.println("  Item type        : " + plan.itemTypeName);
         System.out.println("  Table            : " + plan.rootFingerprint.tableName);
         System.out.println("  Formula          : ICM$AUTODELETEDATE = CREATETS + " + plan.durationSql);
