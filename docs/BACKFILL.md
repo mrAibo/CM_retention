@@ -1,6 +1,6 @@
 # Existing-item backfill before policy assignment
 
-This document describes the explicit `--backfill` workflow in `cm-retention 0.3.1`.
+This document describes the explicit `--backfill` workflow in `cm-retention 0.3.4`.
 
 ## Purpose
 
@@ -117,6 +117,8 @@ Retention date already set: 0
 
 `Immediately expired after` is critical: those rows receive an auto-delete date already in the past and can become eligible for AUTO_DELETE after policy assignment.
 
+Since 0.3.4 these seven plan counters are calculated by one aggregate SELECT per root table instead of seven independent COUNT queries. This keeps the same output and safety checks while avoiding repeated full scans on large ItemTypes.
+
 ## Safety rules
 
 1. Only rows where both `ICM$RETENTIONDATE` and `ICM$AUTODELETEDATE` are NULL are changed.
@@ -126,9 +128,10 @@ Retention date already set: 0
 5. Re-running the same backfill is idempotent for rows already updated.
 6. DB2 UPDATE is committed and verified before IBM CM policy assignment begins.
 7. If eligible NULL rows remain after the update, policy assignment does not start and exit code 6 is returned.
-8. After assignment, a fresh process verifies both the policy assignment and residual NULL count.
+8. After assignment, CM reconnect/persisted-state verification checks the actual ItemType state; final DB2 verification checks that no eligible NULL rows remain.
 9. Multi-segment cases currently fail closed rather than updating only one segment.
-10. If DB2 backfill committed but assignment/final verification is not clean, the overall command returns exit code 6.
+10. If DB2 backfill completed but assignment/final verification is not clean, the overall command returns exit code 6.
+11. Batch mode checks the ItemType assignment and critical root/policy semantics again immediately before each write; a stale plan is refused.
 
 ## Ordering and partial-success behavior
 
@@ -182,7 +185,21 @@ Automation:
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-All ItemTypes are fully planned/validated before the first mutation. Actual execution is sequential and non-atomic.
+All ItemTypes are fully planned/validated before the first mutation. Actual execution remains sequential, fail-fast and non-atomic.
+
+### Batch performance model since 0.3.4
+
+The complete `--file` workflow runs in one JVM instead of launching separate Java processes for every ItemType and every backfill stage.
+
+For backfill batches:
+
+- one `BackfillService` instance reuses one DB2 JDBC connection across Phase 1 and Phase 2
+- each Phase-1 root table needs one aggregate statistics query instead of seven COUNT queries
+- final verification performs only the required assignment/root/NULL checks instead of rebuilding the complete statistics plan
+- CM validation is shared inside one JVM; after validation the CM session is deliberately discarded before the write phase
+- the existing reconnect-based persisted-state verification after each CM write remains enabled
+
+No parallel DB2 UPDATEs are used. Sequential writes are intentional to avoid multiplying transaction-log, I/O and lock pressure on large CM root tables.
 
 ## DB2 configuration
 
