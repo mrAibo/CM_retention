@@ -61,11 +61,29 @@ DOCTOR_MODE=0
 HAS_FILE=0
 HAS_BACKFILL=0
 HAS_DRY_RUN=0
+HAS_INLINE_BATCH=0
 for arg in "$@"; do
     [[ "$arg" == --file ]] && HAS_FILE=1
     [[ "$arg" == --backfill ]] && HAS_BACKFILL=1
     [[ "$arg" == --dry-run ]] && HAS_DRY_RUN=1
 done
+
+# A comma-separated first positional ItemType argument is a convenience form
+# for batch mode. The actual normalization happens only after normal preflight;
+# here we only decide which execution engine must be used.
+if [[ $HAS_FILE -eq 0 && ( ${1:-} == assign || ${1:-} == unassign ) ]]; then
+    for ((i=2; i<=$#; i++)); do
+        arg=${!i}
+        case "$arg" in
+            --yes|--dry-run|--backfill) continue ;;
+            --*) continue ;;
+            *)
+                [[ "$arg" == *,* ]] && HAS_INLINE_BATCH=1
+                break
+                ;;
+        esac
+    done
+fi
 
 NEEDS_CONFIG=1
 case ${1:-} in
@@ -211,6 +229,84 @@ done
 export CLASSPATH="${JAR}:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*${EXTRA_CP}${CLASSPATH:+:${CLASSPATH}}"
 export LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
+BATCH_ORIGINAL_ARGS=()
+INLINE_BATCH_ARGS=()
+INLINE_BATCH_FILE=""
+
+cleanup_inline_batch_file() {
+    if [[ -n "$INLINE_BATCH_FILE" && -f "$INLINE_BATCH_FILE" ]]; then
+        rm -f -- "$INLINE_BATCH_FILE"
+    fi
+}
+
+normalize_inline_batch_args() {
+    local -a args=("$@")
+    local -a raw_items=()
+    local -A seen=()
+    local command=${args[0]:-}
+    local spec_index=-1
+    local spec=""
+    local arg raw item
+    local i count=0
+
+    for ((i=1; i<${#args[@]}; i++)); do
+        arg=${args[$i]}
+        case "$arg" in
+            --yes|--dry-run|--backfill) continue ;;
+            --*) continue ;;
+            *)
+                spec_index=$i
+                spec=$arg
+                break
+                ;;
+        esac
+    done
+
+    if [[ $spec_index -lt 0 || "$spec" != *,* ]]; then
+        echo "ERROR: internal inline batch normalization failed: comma-separated ItemType list not found" >&2
+        return 2
+    fi
+
+    if ! INLINE_BATCH_FILE=$(mktemp "${TMPDIR:-/tmp}/cm-retention-items.XXXXXX"); then
+        echo "ERROR: unable to create temporary ItemType batch file" >&2
+        return 2
+    fi
+    chmod 600 "$INLINE_BATCH_FILE" 2>/dev/null || true
+    trap cleanup_inline_batch_file EXIT
+
+    IFS=',' read -r -a raw_items <<< "$spec"
+    : > "$INLINE_BATCH_FILE"
+    for raw in "${raw_items[@]}"; do
+        item="${raw#"${raw%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        if [[ -z "$item" ]]; then
+            echo "ERROR: comma-separated ItemType list contains an empty entry" >&2
+            return 2
+        fi
+        if [[ -n ${seen[$item]+x} ]]; then
+            echo "ERROR: duplicate ItemType '$item' in comma-separated list" >&2
+            return 2
+        fi
+        seen["$item"]=1
+        if ! printf '%s\n' "$item" >> "$INLINE_BATCH_FILE"; then
+            echo "ERROR: unable to write temporary ItemType batch file" >&2
+            return 2
+        fi
+        count=$((count + 1))
+    done
+
+    if (( count < 2 )); then
+        echo "ERROR: comma-separated batch syntax requires at least two ItemTypes" >&2
+        return 2
+    fi
+
+    INLINE_BATCH_ARGS=("$command" "--file" "$INLINE_BATCH_FILE")
+    for ((i=1; i<${#args[@]}; i++)); do
+        [[ $i -eq $spec_index ]] && continue
+        INLINE_BATCH_ARGS+=("${args[$i]}")
+    done
+}
+
 run_batch() {
     "$JAVA" -cp "$CLASSPATH" BatchMain "$@"
 }
@@ -238,9 +334,18 @@ run_batch_with_audit() {
         echo "started=$(date '+%Y-%m-%dT%H:%M:%S%z')"
         echo "user=$(id -un 2>/dev/null || echo unknown)"
         echo "host=$(hostname 2>/dev/null || echo unknown)"
-        printf 'command='
-        printf ' %q' "$@"
-        printf '\n'
+        if (( ${#BATCH_ORIGINAL_ARGS[@]} > 0 )); then
+            printf 'command='
+            printf ' %q' "${BATCH_ORIGINAL_ARGS[@]}"
+            printf '\n'
+            printf 'normalized_command='
+            printf ' %q' "$@"
+            printf '\n'
+        else
+            printf 'command='
+            printf ' %q' "$@"
+            printf '\n'
+        fi
         echo "source_env=$ENV_FILE"
         echo "--- batch output ---"
     } >> "$log_file"
@@ -309,6 +414,17 @@ run_batch_with_audit() {
 run_single_backfill() {
     "$JAVA" -cp "$CLASSPATH" SingleBackfillMain "$@"
 }
+
+if [[ $HAS_INLINE_BATCH -eq 1 ]]; then
+    BATCH_ORIGINAL_ARGS=("$@")
+    if normalize_inline_batch_args "$@"; then
+        set -- "${INLINE_BATCH_ARGS[@]}"
+        HAS_FILE=1
+    else
+        rc=$?
+        exit "$rc"
+    fi
+fi
 
 if [[ $HAS_FILE -eq 1 ]]; then
     case ${1:-} in
