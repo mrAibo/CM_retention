@@ -81,6 +81,7 @@ fi
 
 : "${IBMCMROOT:=$(read_env_value IBMCMROOT "$ENV_FILE")}" 
 : "${JAVA_HOME:=$(read_env_value JAVA_HOME "$ENV_FILE")}" 
+: "${ORACLE_HOME:=$(read_env_value ORACLE_HOME "$ENV_FILE")}" 
 IBMCMROOT=${IBMCMROOT:-/opt/IBM/db2cmv8}
 JAVA_HOME=${JAVA_HOME:-/opt/IBM/WebSphere/AppServer/java/8.0}
 
@@ -131,32 +132,68 @@ if [[ $DOCTOR_MODE == 1 ]]; then
 fi
 
 export IBMCMROOT JAVA_HOME
+if [[ -n "${ORACLE_HOME:-}" ]]; then
+    export ORACLE_HOME
+fi
 if [[ -f "$ENV_FILE" ]]; then
     export CM_RETENTION_ENV_FILE="$ENV_FILE"
 fi
 
-# Optional DB2 JCC driver used by explicit --backfill workflows.
-DB2_JDBC_JAR=$(read_env_value DB2_JDBC_JAR "$ENV_FILE")
-if [[ -n "$DB2_JDBC_JAR" ]]; then
-    [[ -f "$DB2_JDBC_JAR" ]] || preflight_fail "DB2 JDBC driver" "DB2_JDBC_JAR does not exist: $DB2_JDBC_JAR"
-else
-    for candidate in \
-        "${IBMCMROOT}/lib/db2jcc4.jar" \
-        "${IBMCMROOT}/lib/db2jcc.jar" \
-        "/opt/IBM/db2/V11.5/java/db2jcc4.jar" \
-        "/opt/ibm/db2/V11.5/java/db2jcc4.jar"; do
-        if [[ -f "$candidate" ]]; then
-            DB2_JDBC_JAR=$candidate
-            break
+# JDBC drivers used by CM itself and by explicit --backfill operations.
+# BACKFILL_JDBC_JAR is the preferred database-neutral setting. Legacy DB2 and
+# Oracle-specific names remain accepted. Without an explicit path, known DB2
+# and Oracle CM installation locations are discovered and added if present.
+BACKFILL_JDBC_JAR=${BACKFILL_JDBC_JAR:-$(read_env_value BACKFILL_JDBC_JAR "$ENV_FILE")}
+DB2_JDBC_JAR=${DB2_JDBC_JAR:-$(read_env_value DB2_JDBC_JAR "$ENV_FILE")}
+ORACLE_JDBC_JAR=${ORACLE_JDBC_JAR:-$(read_env_value ORACLE_JDBC_JAR "$ENV_FILE")}
+
+JDBC_JARS=()
+add_jdbc_jar() {
+    local jar=$1
+    local explicit=${2:-0}
+    [[ -n "$jar" ]] || return 0
+    if [[ ! -f "$jar" ]]; then
+        if [[ $explicit -eq 1 ]]; then
+            preflight_fail "JDBC driver" "configured JDBC driver does not exist: $jar"
         fi
+        return 0
+    fi
+    local existing
+    for existing in "${JDBC_JARS[@]:-}"; do
+        [[ "$existing" == "$jar" ]] && return 0
     done
+    JDBC_JARS+=("$jar")
+}
+
+if [[ -n "$BACKFILL_JDBC_JAR" ]]; then
+    add_jdbc_jar "$BACKFILL_JDBC_JAR" 1
+else
+    [[ -n "$DB2_JDBC_JAR" ]] && add_jdbc_jar "$DB2_JDBC_JAR" 1
+    [[ -n "$ORACLE_JDBC_JAR" ]] && add_jdbc_jar "$ORACLE_JDBC_JAR" 1
+
+    if [[ ${#JDBC_JARS[@]} -eq 0 ]]; then
+        for candidate in \
+            "${IBMCMROOT}/lib/db2jcc4.jar" \
+            "${IBMCMROOT}/lib/db2jcc.jar" \
+            "/opt/IBM/db2/V11.5/java/db2jcc4.jar" \
+            "/opt/ibm/db2/V11.5/java/db2jcc4.jar" \
+            "${IBMCMROOT}/lib/ojdbc8.jar" \
+            "${JAVA_HOME}/../OracleLibs/ojdbc8.jar" \
+            "/opt/IBM/WebSphere/AppServer/OracleLibs/ojdbc8.jar"; do
+            add_jdbc_jar "$candidate" 0
+        done
+        if [[ -n "${ORACLE_HOME:-}" ]]; then
+            add_jdbc_jar "${ORACLE_HOME}/jdbc/lib/ojdbc8.jar" 0
+        fi
+    fi
 fi
 
 EXTRA_CP=""
-if [[ -n "$DB2_JDBC_JAR" ]]; then
-    EXTRA_CP=":${DB2_JDBC_JAR}"
-    preflight_ok "DB2 JDBC driver" "$DB2_JDBC_JAR"
-fi
+for jdbc_jar in "${JDBC_JARS[@]:-}"; do
+    [[ -n "$jdbc_jar" ]] || continue
+    EXTRA_CP="${EXTRA_CP}:${jdbc_jar}"
+    preflight_ok "JDBC driver" "$jdbc_jar"
+done
 
 export CLASSPATH="${JAR}:${IBMCMROOT}/cmgmt:${IBMCMROOT}/lib/*${EXTRA_CP}${CLASSPATH:+:${CLASSPATH}}"
 export LD_LIBRARY_PATH="${IBMCMROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
