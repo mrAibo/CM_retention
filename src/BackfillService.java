@@ -13,21 +13,28 @@ import java.sql.Statement;
 import java.util.Locale;
 
 /**
- * Direct DB2 backfill support for existing root-component rows.
+ * Direct database backfill support for existing root-component rows.
  *
- * One BackfillService instance lazily opens one DB2 connection and reuses it
- * for its lifetime. The detailed plan performs one aggregate root-table scan;
- * the pre-write path deliberately does not repeat that scan.
+ * One BackfillService instance lazily opens one JDBC connection and reuses it
+ * for its lifetime. Database-specific timestamp arithmetic, current-timestamp
+ * syntax, one-row probing and JDBC driver loading are delegated to the selected
+ * BackfillDialect (DB2 or Oracle).
  */
 final class BackfillService {
     private static final String MISSING_DATES =
             "ICM$RETENTIONDATE IS NULL AND ICM$AUTODELETEDATE IS NULL";
 
     private final BackfillConfig config;
+    private final BackfillDialect dialect;
     private Connection connection;
 
     BackfillService(BackfillConfig config) {
         this.config = config;
+        this.dialect = config.dialect;
+    }
+
+    String databaseDisplayName() {
+        return dialect.displayName();
     }
 
     /** Detailed, read-only plan used by dry-run/Phase 1. */
@@ -42,7 +49,8 @@ final class BackfillService {
         RootFingerprint root = resolveRootFingerprint(db, itemType.getIntId());
         String table = qualified(root.tableName);
         String duration = durationSql(policy);
-        long[] counts = queryCounts(db, buildPlanSql(table, duration), 7);
+        long[] counts = queryCounts(db,
+                buildPlanSql(table, duration, dialect.currentTimestampExpression()), 7);
 
         return new BackfillPlan(
                 itemType.getName(), targetPolicy, CmService.normalizePolicy(currentPolicy),
@@ -76,24 +84,28 @@ final class BackfillService {
 
         PolicyFingerprint currentPolicyFingerprint = PolicyFingerprint.from(policy);
         validated.policyFingerprint.requireSame(
-                currentPolicyFingerprint, "after validation and before DB2 backfill", 5);
+                currentPolicyFingerprint, "after validation and before database backfill", 5);
 
         Connection db = connection();
         RootFingerprint currentRoot = resolveRootFingerprint(db, itemType.getIntId());
         validated.rootFingerprint.requireSame(
-                currentRoot, "after validation and before DB2 backfill", 5);
+                currentRoot, "after validation and before database backfill", 5);
         validateSegment(currentRoot, 5);
 
         String table = qualified(currentRoot.tableName);
-        if (queryExists(db, "SELECT 1 FROM " + table
-                + " WHERE " + MISSING_DATES
-                + " AND CREATETS IS NULL FETCH FIRST 1 ROW ONLY")) {
+        String missingCreateTimestamp = MISSING_DATES + " AND CREATETS IS NULL";
+        if (queryExists(db, dialect.existsQuery(table, missingCreateTimestamp))) {
             throw new CliException("Backfill refused: at least one eligible row has NULL CREATETS.", 5);
+        }
+
+        String currentDuration = durationSql(policy);
+        if (!validated.durationSql.equals(currentDuration)) {
+            throw new CliException("Backfill SQL duration changed after validation. Re-run the operation.", 5);
         }
 
         return new BackfillWritePlan(
                 itemType.getName(), targetPolicy, CmService.normalizePolicy(currentPolicy),
-                currentRoot, currentPolicyFingerprint, validated.durationSql,
+                currentRoot, currentPolicyFingerprint, currentDuration,
                 validated.fillableRows);
     }
 
@@ -131,10 +143,10 @@ final class BackfillService {
                 rollbackQuietly(db);
                 throw e;
             }
-            throw new CliException("Backfill DB2 COMMIT completed for " + updated
+            throw new CliException("Backfill " + dialect.displayName() + " COMMIT completed for " + updated
                     + " row(s), but post-commit verification failed (SQLSTATE "
                     + safeSqlState(e) + "): " + safeSqlMessage(e)
-                    + ". Policy assignment was not started; verify DB2 state before retrying.", 6);
+                    + ". Policy assignment was not started; verify database state before retrying.", 6);
         } finally {
             restoreAutoCommitOrReconnect(db, originalAutoCommit);
         }
@@ -178,7 +190,9 @@ final class BackfillService {
         }
     }
 
-    static String buildPlanSql(String qualifiedTable, String duration) {
+    static String buildPlanSql(String qualifiedTable,
+                               String duration,
+                               String currentTimestampExpression) {
         String expirationExpression = "CREATETS + " + duration;
         return "SELECT "
                 + "COUNT(*), "
@@ -186,7 +200,7 @@ final class BackfillService {
                 + "SUM(CASE WHEN " + MISSING_DATES + " AND CREATETS IS NOT NULL THEN 1 ELSE 0 END), "
                 + "SUM(CASE WHEN " + MISSING_DATES + " AND CREATETS IS NULL THEN 1 ELSE 0 END), "
                 + "SUM(CASE WHEN " + MISSING_DATES + " AND CREATETS IS NOT NULL AND "
-                + expirationExpression + " <= CURRENT TIMESTAMP THEN 1 ELSE 0 END), "
+                + expirationExpression + " <= " + currentTimestampExpression + " THEN 1 ELSE 0 END), "
                 + "SUM(CASE WHEN ICM$AUTODELETEDATE IS NOT NULL THEN 1 ELSE 0 END), "
                 + "SUM(CASE WHEN ICM$RETENTIONDATE IS NOT NULL THEN 1 ELSE 0 END) "
                 + "FROM " + qualifiedTable;
@@ -204,12 +218,24 @@ final class BackfillService {
         if (connection != null && !connection.isClosed()) {
             return connection;
         }
-        try {
-            Class.forName("com.ibm.db2.jcc.DB2Driver");
-        } catch (ClassNotFoundException e) {
-            throw new CliException("DB2 JDBC driver not found. Add db2jcc4.jar via DB2_JDBC_JAR"
-                    + " in the selected .env file or place the driver on the runtime classpath.", 2);
+
+        boolean loaded = false;
+        for (String driverClass : dialect.driverClassNames()) {
+            try {
+                Class.forName(driverClass);
+                loaded = true;
+                break;
+            } catch (ClassNotFoundException ignored) {
+                // Try the next compatible driver class name.
+            }
         }
+        if (!loaded) {
+            throw new CliException(dialect.displayName() + " JDBC driver not found. Add "
+                    + dialect.driverJarHint() + " via BACKFILL_JDBC_JAR"
+                    + " (legacy DB2_JDBC_JAR / ORACLE_JDBC_JAR are also accepted by the launcher)"
+                    + " or place the driver on the runtime classpath.", 2);
+        }
+
         connection = DriverManager.getConnection(config.jdbcUrl, config.user, config.password);
         return connection;
     }
@@ -303,7 +329,7 @@ final class BackfillService {
         return config.schema + "." + tableName;
     }
 
-    private static void validatePolicy(DKRetentionPolicyDefICM policy) {
+    private void validatePolicy(DKRetentionPolicyDefICM policy) {
         if (policy.getRetentionType() != DK_ICM_RETENTION_TYPE.FIXED_TIME) {
             throw new CliException("--backfill supports FIXED_TIME policies only", 5);
         }
@@ -320,7 +346,8 @@ final class BackfillService {
         if (policy.getExpirationTimePeriod() <= 0) {
             throw new CliException("--backfill requires a positive expiration period", 5);
         }
-        sqlUnit(policy.getDefaultExpirationTimeUnit());
+        // Also validates that the selected database dialect supports this unit.
+        durationSql(policy);
     }
 
     private static void validateAssignmentState(String currentPolicy, String targetPolicy) {
@@ -339,18 +366,10 @@ final class BackfillService {
         }
     }
 
-    private static String durationSql(DKRetentionPolicyDefICM policy) {
+    private String durationSql(DKRetentionPolicyDefICM policy) {
         int amount = policy.getExpirationTimePeriod();
-        String unit = sqlUnit(policy.getDefaultExpirationTimeUnit());
-        return amount + " " + unit + (amount == 1 ? "" : "S");
-    }
-
-    private static String sqlUnit(DK_ICM_POLICY_TIME_UNIT unit) {
-        if (unit == DK_ICM_POLICY_TIME_UNIT.YEAR) return "YEAR";
-        if (unit == DK_ICM_POLICY_TIME_UNIT.MONTH) return "MONTH";
-        if (unit == DK_ICM_POLICY_TIME_UNIT.WEEK) return "WEEK";
-        if (unit == DK_ICM_POLICY_TIME_UNIT.DAY) return "DAY";
-        throw new CliException("Unsupported expiration unit for DB2 backfill: " + unit, 5);
+        DK_ICM_POLICY_TIME_UNIT unit = policy.getDefaultExpirationTimeUnit();
+        return dialect.durationSql(amount, unit);
     }
 
     private static String safeSqlState(SQLException e) {
