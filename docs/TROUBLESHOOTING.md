@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Diese Datei sammelt bekannte Betriebs- und IBM-CM-Fehlerbilder für `cm-retention 0.4.0`.
+Diese Datei sammelt bekannte Betriebs- und IBM-CM-Fehlerbilder für `cm-retention 0.4.1`.
 
 ## 1. `.env` wird abgelehnt
 
@@ -59,7 +59,7 @@ Beispiel:
 ERROR: BACKFILL_DB_TYPE=oracle conflicts with JDBC URL jdbc:db2:...
 ```
 
-`0.4.0` erkennt den direkten Backfill-Datenbanktyp am URL-Präfix:
+Der direkte Backfill-Datenbanktyp wird am URL-Präfix erkannt:
 
 ```text
 jdbc:db2:...     -> DB2
@@ -146,9 +146,9 @@ bin/cm-retention assign ITEMTYPE POLICY --backfill --dry-run
 
 ## 8. Exit-Code 6 nach Assign/Unassign/Backfill
 
-Exit `6` bedeutet, dass Persistenz bereits erfolgt sein kann oder eine abschließende Verifikation nicht sauber abgeschlossen wurde.
+Exit `6` bedeutet, dass mindestens eine verifizierte IBM-CM-Sekundärwarnung oder ein Zustand nach möglicher Persistenz aufgetreten ist.
 
-Nicht blind wiederholen. Zuerst aktuellen Zustand lesen:
+Bei einem Einzelbefehl nicht blind wiederholen. Zuerst aktuellen Zustand lesen:
 
 ```bash
 bin/cm-retention itemtype ITEMTYPE
@@ -156,6 +156,17 @@ bin/cm-retention policy POLICY
 ```
 
 Bei Backfill zusätzlich denselben Dry-run erneut ausführen. Wenn der direkte DB-UPDATE bereits committed wurde, darf der zweite Lauf aufgrund der NULL-Guards die bereits gesetzten Auto-Delete-Daten nicht überschreiben.
+
+Ab 0.4.1 kann ein `--file`-Batch vollständig abgearbeitet werden und trotzdem Exit `6` zurückgeben. Das ist dann ausdrücklich im Summary erkennbar:
+
+```text
+Batch complete: 217/217 item types reached a verified final state.
+Clean success     : 180
+Verified warnings : 37
+Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.
+```
+
+In diesem Fall wurden die angeforderten Zustände verifiziert; die Warnungen müssen trotzdem administrativ geprüft werden.
 
 Mit Diagnose:
 
@@ -185,17 +196,71 @@ Für Oracle-basierte CM-Installationen den tatsächlich beteiligten OS-/CM-Proze
 Typisches Fehlerbild:
 
 ```text
-DGL0303A: Invalid parameter
+DGL0303A: Ungültiger Parameter.
 DKAttrDefICM::getViewOperator() opCode : [-1]
 ```
 
 Bei älteren Component Views wurden in realen Umgebungen Einträge mit `VIEWOPERATOR=-1` beobachtet. Der CM-8.7-SDK kann beim Neuaufbau/Aktualisieren der ItemType-View darüber stolpern.
 
-Die vorhandenen SQL-Audit-/Repair-Beispiele in [METADATA_REPAIR.md](METADATA_REPAIR.md) wurden für **DB2** entwickelt und enthalten DB2-Syntax wie `WITH UR`. Sie sind **nicht** automatisch als Oracle-Reparaturanleitung zu verwenden.
+Wichtig ist die Unterscheidung zwischen **Persistenzfehler** und **Sekundärfehler nach Persistenz**.
 
-Keine Massenänderung direkt per SQL durchführen.
+Wenn `cm-retention` meldet:
 
-## 11. Policy kann nicht gelöscht werden
+```text
+WARNING: Policy AUTO_DELETE_1Y was removed from itemtype AM,
+but IBM CM reported a secondary error after persisting the change.
+```
+
+hat `CmService` nach dem IBM-CM-Fehler eine neue Session geöffnet und den gewünschten Persistenzzustand bestätigt. Ein Einzelbefehl liefert trotzdem Exit `6`.
+
+Ab 0.4.1 gilt im Batch:
+
+```text
+OperationWarning + Persistenz verifiziert
+    -> Warning ausgeben
+    -> ItemType als verified zählen
+    -> mit nächstem ItemType fortfahren
+    -> Batch am Ende RC 6
+
+Zustand nicht verifizierbar / anderer Fehler
+    -> sofort stoppen
+```
+
+Damit muss ein großer Legacy-Bestand nicht für jeden bereits erfolgreich persistierten `VIEWOPERATOR=-1`-Sekundärfehler manuell neu gestartet werden.
+
+Die vorhandenen SQL-Audit-/Repair-Hinweise in [METADATA_REPAIR.md](METADATA_REPAIR.md) wurden für **DB2** entwickelt und enthalten DB2-Syntax wie `WITH UR`. Sie sind **nicht** automatisch als Oracle-Reparaturanleitung zu verwenden.
+
+Keine pauschale Massenänderung `VIEWOPERATOR=-1 -> 0` direkt per SQL durchführen. Die Filtersemantik einer Component View muss vor einer Metadatenreparatur verstanden sein.
+
+## 11. Bereits zugewiesene AUTO_DELETE-Policy nachträglich ändern
+
+In der Praxis kann das Ändern einer bereits vielen ItemTypes zugewiesenen AUTO_DELETE-Policy dazu führen, dass per-ItemType Automatic-Delete-Tasks/Schedules nicht so neu aufgebaut werden wie erwartet.
+
+Besonders vorsichtig behandeln:
+
+```text
+expiration.age
+auto-delete.schedule
+auto-delete.commit-count
+auto-delete.max-items
+auto-delete.max-duration
+auto-delete.force-checkin
+```
+
+Empfohlener kontrollierter Ablauf:
+
+```text
+1. betroffene ItemTypes dry-run prüfen
+2. Policy unassignen
+3. Policy ändern oder neue Policy erstellen
+4. Policy erneut assignen
+5. Automatic-Delete-Tasks/Schedule prüfen
+6. --backfill nur verwenden, wenn Existing-Item-Daten tatsächlich gesetzt/repariert werden müssen
+```
+
+Eine normale Neuzuweisung berechnet vorhandene `ICM$AUTODELETEDATE`-Werte nicht automatisch neu.
+
+## 12. Policy kann nicht gelöscht werden
 
 ```text
 ERROR: Policy is assigned to ... itemtype(s)
@@ -221,7 +286,7 @@ bin/cm-retention delete POLICY_NAME --dry-run
 bin/cm-retention delete POLICY_NAME
 ```
 
-## 12. Stacktrace einschalten
+## 13. Stacktrace einschalten
 
 ```bash
 CM_DEBUG=true bin/cm-retention status
