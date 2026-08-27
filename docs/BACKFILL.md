@@ -1,6 +1,6 @@
 # Existing-item backfill before policy assignment
 
-This document describes the explicit `--backfill` workflow in `cm-retention 0.4.1`.
+This document describes the explicit `--backfill` workflow in `cm-retention 0.4.2`.
 
 ## Purpose
 
@@ -259,6 +259,7 @@ If the mismatch occurs before the database write, the command returns exit `5`. 
 12. Writes remain sequential; no parallel direct-database UPDATEs are used.
 13. The tool never calls `deleteExpiredItems()` and never directly deletes documents.
 14. A verified IBM CM secondary assignment warning is surfaced only after the stronger final Policy/Root/assignment/database verification succeeds.
+15. In `--file` mode, a second JVM performs an additional independent final assignment-state verification after Phase 2.
 
 ## Transaction boundary
 
@@ -280,7 +281,7 @@ The direct database transaction and IBM CM API assignment are not one distribute
 
 If `CmService` raises an `OperationWarning` after the assignment because IBM CM reported a secondary error, `BackfillWorkflow` does **not** immediately classify that as a successful backfill. It completes the final fresh-session Policy fingerprint, Root fingerprint, assignment and residual-NULL verification first. Only if all of those checks succeed is the original warning rethrown as a **verified warning**. Single-item mode still returns RC `6`; batch mode may then continue with the next ItemType while preserving an overall RC `6`.
 
-Any other assignment or final-verification problem remains fail-closed and stops the batch.
+Any other assignment or final-verification problem remains fail-closed and stops the mutation batch.
 
 ## Configuration
 
@@ -348,19 +349,15 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --dry-run
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
-The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService` reuses one JDBC connection across the batch. Phase 1 validates every ItemType before the first mutation.
+The header includes `Database: DB2` or `Database: Oracle`. One `BackfillService` reuses one JDBC connection across the mutation batch. Phase 1 validates every ItemType before the first mutation.
 
-Phase 2 remains sequential and non-atomic. True runtime, stale-state or verification failures are fail-fast. Beginning with 0.4.1, a **verified** IBM CM secondary warning does not stop later ItemTypes; it is counted in the final summary and makes the overall batch return RC `6`.
+Phase 2 remains sequential and non-atomic. True runtime, stale-state or verification failures are fail-fast. Beginning with 0.4.1, a **verified** IBM CM secondary warning does not stop later ItemTypes; it is counted in the Phase-2 summary and makes the overall batch return RC `6`.
 
-Example:
+Beginning with 0.4.2, every real `--file --backfill` that reaches Phase 2 is followed by an independent second-JVM verification of the final **policy assignment state** for every exact ItemType from the original file. This does not replace the stronger per-ItemType backfill DB/Policy/Root verification; it adds a separate post-batch assignment-state check using a fresh CM session.
 
-```text
-Batch complete: 217/217 item types reached a verified final state.
-Clean success     : 180
-Verified warnings : 37
-Warning itemtypes : AM, ...
-Result            : requested state was verified, but IBM CM reported secondary errors; returning exit 6.
-```
+Confirmed final assignment mismatches are written to the generated `*-retry.txt`. A retry uses the original policy and `--backfill`; the NULL guards keep already-completed row updates idempotent. SDK read errors are reported as state-unknown and are not auto-added to the retry file.
+
+Each `--file` run also receives an audit log under `<application-home>/logs` by default (override with `CM_RETENTION_LOG_DIR`).
 
 ## Self-test
 
@@ -377,6 +374,7 @@ Result            : requested state was verified, but IBM CM reported secondary 
 - `CREATETS` rather than the incorrect `ICM$CREATETS`
 - UPDATE NULL guards
 - compact verified-warning batch summary formatting
+- independent final-verifier policy-state comparison semantics
 
 Manual test:
 
@@ -393,6 +391,8 @@ bin/cm-retention selftest
 5. Review root table, generated formula, eligible count, immediately-expired count, and selected database.
 6. Ensure database backup/change controls are in place.
 7. Run the real command.
-8. Inspect the return code. RC `6` may mean either a verified IBM CM secondary warning or another persisted/partial-success condition; use the printed summary/details to distinguish them.
-9. Re-run dry-run/status checks and inspect ItemType/policy state.
-10. Review IBM CM and DB2/Oracle logs if any warning/error occurred.
+8. Inspect the Phase-2 summary and the independent Phase-3 final verification.
+9. Confirm `State mismatches = 0` and `Verification errors = 0`; if a retry file is generated, inspect it before reuse.
+10. Inspect the return code. RC `6` may mean a verified IBM CM secondary warning, an independent final-verifier mismatch/error, or another persisted/partial-success condition; use the audit log and printed details to distinguish them.
+11. Re-run dry-run/status checks and inspect ItemType/policy state when any warning/error occurred.
+12. Review IBM CM and DB2/Oracle logs if needed.
