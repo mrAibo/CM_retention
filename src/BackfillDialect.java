@@ -99,17 +99,17 @@ final class OracleBackfillDialect implements BackfillDialect {
     @Override
     public String durationSql(int amount, DK_ICM_POLICY_TIME_UNIT unit) {
         if (unit == DK_ICM_POLICY_TIME_UNIT.YEAR) {
-            return "NUMTOYMINTERVAL(" + amount + ", 'YEAR')";
+            return "INTERVAL '" + amount + "' YEAR";
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.MONTH) {
-            return "NUMTOYMINTERVAL(" + amount + ", 'MONTH')";
+            return "INTERVAL '" + amount + "' MONTH";
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.WEEK) {
             long days = ((long) amount) * 7L;
-            return "NUMTODSINTERVAL(" + days + ", 'DAY')";
+            return "INTERVAL '" + days + "' DAY";
         }
         if (unit == DK_ICM_POLICY_TIME_UNIT.DAY) {
-            return "NUMTODSINTERVAL(" + amount + ", 'DAY')";
+            return "INTERVAL '" + amount + "' DAY";
         }
         throw new CliException("Unsupported expiration unit for Oracle backfill: " + unit, 5);
     }
@@ -119,8 +119,8 @@ final class OracleBackfillDialect implements BackfillDialect {
 
     @Override
     public String existsQuery(String qualifiedTable, String condition) {
-        // ROWNUM keeps this compatible with Oracle versions before FETCH FIRST
-        // and is valid for the Oracle 19c level supported by CM 8.7.
+        // ROWNUM is valid on Oracle 19c and avoids relying on FETCH FIRST syntax
+        // in this deliberately minimal one-row probe.
         return "SELECT 1 FROM " + qualifiedTable + " WHERE " + condition + " AND ROWNUM = 1";
     }
 }
