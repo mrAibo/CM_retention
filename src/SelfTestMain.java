@@ -124,12 +124,14 @@ public final class SelfTestMain {
 
         assertTrue("INTERVAL '5' YEAR".equals(
                 oracle.durationSql(5, DK_ICM_POLICY_TIME_UNIT.YEAR)), "Oracle year duration");
-        assertTrue("INTERVAL '3' MONTH".equals(
-                oracle.durationSql(3, DK_ICM_POLICY_TIME_UNIT.MONTH)), "Oracle month duration");
+        assertTrue("INTERVAL '300' MONTH(3)".equals(
+                oracle.durationSql(300, DK_ICM_POLICY_TIME_UNIT.MONTH)), "Oracle month precision");
         assertTrue("INTERVAL '14' DAY".equals(
                 oracle.durationSql(2, DK_ICM_POLICY_TIME_UNIT.WEEK)), "Oracle week duration");
-        assertTrue("INTERVAL '10' DAY".equals(
-                oracle.durationSql(10, DK_ICM_POLICY_TIME_UNIT.DAY)), "Oracle day duration");
+        assertTrue("INTERVAL '364' DAY(3)".equals(
+                oracle.durationSql(52, DK_ICM_POLICY_TIME_UNIT.WEEK)), "Oracle week precision");
+        assertTrue("INTERVAL '365' DAY(3)".equals(
+                oracle.durationSql(365, DK_ICM_POLICY_TIME_UNIT.DAY)), "Oracle day precision");
         assertTrue(oracle.existsQuery("ICMADMIN.ICMUT01468001", "CREATETS IS NULL")
                 .contains("ROWNUM = 1"), "Oracle exists syntax");
 
@@ -144,6 +146,14 @@ public final class SelfTestMain {
         assertTrue(oracleUpdate.contains(
                 "SET ICM$AUTODELETEDATE = CREATETS + INTERVAL '5' YEAR"),
                 "Oracle update formula");
+
+        boolean tooLargeRejected = false;
+        try {
+            oracle.durationSql(2000000000, DK_ICM_POLICY_TIME_UNIT.WEEK);
+        } catch (CliException e) {
+            tooLargeRejected = e.exitCode == 5;
+        }
+        assertTrue(tooLargeRejected, "Oracle interval precision overflow refused");
     }
 
     private static void testTimingFormat() {
