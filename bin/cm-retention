@@ -247,13 +247,14 @@ run_batch_with_audit() {
 
     echo "Audit log: $log_file"
 
-    set +e
-    "$JAVA" -cp "$CLASSPATH" BatchMain "$@" \
+    if "$JAVA" -cp "$CLASSPATH" BatchMain "$@" \
         > >(tee -a "$log_file") \
-        2> >(tee -a "$log_file" >&2)
-    batch_rc=$?
-    wait
-    set -e
+        2> >(tee -a "$log_file" >&2); then
+        batch_rc=0
+    else
+        batch_rc=$?
+    fi
+    wait || true
 
     verify_rc=0
     if [[ $HAS_DRY_RUN -eq 0 ]] && grep -Fq "Phase 2/2: applying changes" "$log_file"; then
@@ -264,14 +265,15 @@ run_batch_with_audit() {
         echo
         echo "Starting independent final verification..."
 
-        set +e
-        CM_RETENTION_RETRY_FILE="$retry_file" \
+        if CM_RETENTION_RETRY_FILE="$retry_file" \
             "$JAVA" -cp "$CLASSPATH" BatchVerifyMain "$@" \
             > >(tee -a "$log_file") \
-            2> >(tee -a "$log_file" >&2)
-        verify_rc=$?
-        wait
-        set -e
+            2> >(tee -a "$log_file" >&2); then
+            verify_rc=0
+        else
+            verify_rc=$?
+        fi
+        wait || true
     else
         echo "Final verification: skipped (dry-run, validation-only, or cancelled before write phase)." \
             | tee -a "$log_file"
@@ -311,11 +313,11 @@ run_single_backfill() {
 if [[ $HAS_FILE -eq 1 ]]; then
     case ${1:-} in
         assign|unassign)
-            set +e
-            run_batch_with_audit "$@"
-            rc=$?
-            set -e
-            exit "$rc"
+            if run_batch_with_audit "$@"; then
+                exit 0
+            else
+                exit $?
+            fi
             ;;
         *)
             echo "ERROR: --file is supported only for assign and unassign" >&2
