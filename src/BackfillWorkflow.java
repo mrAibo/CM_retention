@@ -41,7 +41,7 @@ final class BackfillWorkflow {
         long dbStarted = Timing.start();
         BackfillResult result;
         if (Db2ChunkedBackfill.shouldUse(backfill, writePlan)) {
-            result = Db2ChunkedBackfill.apply(writePlan, new Db2ChunkedBackfill.CommitGuard() {
+            result = Db2ChunkedBackfill.apply(backfill, writePlan, new Db2ChunkedBackfill.CommitGuard() {
                 @Override
                 public void verify(long committedRows) throws Exception {
                     cm.closeQuietly();
@@ -68,9 +68,6 @@ final class BackfillWorkflow {
         System.out.println("Backfill committed : " + result.updatedRows + " row(s)");
         System.out.println("Remaining NULL rows: " + result.remainingRows);
 
-        // After a database mutation, any newly detected stale state is a partial-
-        // success condition. If zero rows changed, no database data was modified
-        // and a normal stale-plan refusal (5) remains accurate.
         int postBackfillExit = result.changedRows() ? 6 : 5;
 
         long guardStarted = Timing.start();
@@ -113,10 +110,6 @@ final class BackfillWorkflow {
                     postBackfillExit);
         } catch (Exception e) {
             assignmentProblem = e;
-            // OperationWarning already means CmService verified that the requested
-            // assignment persisted. Keep it pending until the stronger final
-            // Policy/Root/NULL verification below completes. Other exceptions are
-            // still reported immediately and remain fail-closed.
             if (!(e instanceof OperationWarning)) {
                 printEmbeddedProblem("Policy assignment", e);
             }
@@ -126,8 +119,6 @@ final class BackfillWorkflow {
         Exception verificationProblem = null;
         long verifyStarted = Timing.start();
         try {
-            // Force a new CM session/cache view for the final persisted-state
-            // check. This also detects a policy changed during the assignment.
             cm.closeQuietly();
             DKItemTypeDefICM freshItem = cm.requireItemType(validated.itemTypeName);
             DKRetentionPolicyDefICM freshPolicy = cm.requirePolicyFresh(validated.policyName);
@@ -166,10 +157,6 @@ final class BackfillWorkflow {
         printTiming(backfill, preflightNanos, dbNanos, guardNanos, cmNanos, verifyNanos, totalStarted);
 
         if (assignmentProblem instanceof OperationWarning) {
-            // The assignment produced a secondary IBM CM error, but both the
-            // assignment and the complete backfill state were verified afterwards.
-            // Surface a verified warning so single-item mode still returns RC6,
-            // while BatchMain may safely continue with later ItemTypes.
             throw (OperationWarning) assignmentProblem;
         }
     }
