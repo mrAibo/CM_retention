@@ -2,7 +2,7 @@
 
 `cm-retention` is a small administration CLI for **IBM Content Manager Enterprise Edition 8.7** retention and expiration policies.
 
-Current version: **0.4.2**
+Current version: **0.4.3**
 
 The project intentionally stays narrow: Java 8, the IBM CM SDK already installed on the server, no GUI, no external CLI framework, and no direct document-delete command.
 
@@ -45,6 +45,7 @@ The expiration/retention semantics are identical; only the automatic-delete sche
 - preview writes with `--dry-run`
 - guarded existing-item `--backfill` before assignment
 - direct backfill against DB2 or Oracle
+- adaptive chunked COMMITs for large DB2 backfills
 - Policy/Root fingerprints around database/CM transaction boundaries
 - verified-warning continuation for IBM CM secondary errors in batch mode
 - independent post-batch final verification in a second JVM/fresh CM session
@@ -215,16 +216,16 @@ Build on a compatible CM 8.7 host:
 
 The build compiles all Java sources and runs `SelfTestMain` before creating artifacts. The self-test loads IBM CM SDK classes but does **not** log in to Content Manager and does **not** open a DB2/Oracle JDBC connection.
 
-Version 0.4.2 produces:
+Version 0.4.3 produces:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.4.2.jar
+build/cm-retention-0.4.3.jar
 build/.version
 build/ret-policy.properties
 build/profiles/*.properties
-build/cm-retention-0.4.2-runtime.tar.gz
-build/SHA256SUMS-0.4.2
+build/cm-retention-0.4.3-runtime.tar.gz
+build/SHA256SUMS-0.4.3
 ```
 
 Verify:
@@ -239,8 +240,8 @@ bin/cm-retention doctor
 Expected version:
 
 ```text
-0.4.2
-cm-retention 0.4.2
+0.4.3
+cm-retention 0.4.3
 ```
 
 The runtime bundle contains no IBM SDK, JDBC driver, or credentials.
@@ -302,6 +303,12 @@ ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 
 DB2 uses `CURRENT TIMESTAMP` for the immediate-expiration plan calculation and `FETCH FIRST 1 ROW ONLY` for the fail-fast probe.
 
+### Large DB2 backfills in 0.4.3
+
+Large DB2 backfills are split into bounded UPDATE/COMMIT chunks instead of one very large transaction. This avoids exhausting the active DB2 transaction log (`SQLCODE=-964`). The chunked path keeps the same NULL guards and therefore remains idempotent on retry.
+
+The initial chunk size is at most 250,000 rows. If DB2 reports `-964`, only the current uncommitted chunk is rolled back and retried with a smaller chunk size. ItemType assignment, Policy fingerprint and Root fingerprint are checked after every committed chunk; a mismatch stops with exit `6` and prevents policy assignment.
+
 ## Oracle backfill SQL
 
 The Oracle dialect follows the interval-literal form used by IBM's CM SQL examples. A one-year policy is generated as:
@@ -350,6 +357,7 @@ It also:
 - rejects unsupported multi-segment roots
 - fingerprints Policy and root metadata
 - revalidates before UPDATE, after database COMMIT, and during final verification
+- for chunked DB2 backfills, revalidates assignment/Policy/Root after each chunk COMMIT
 - verifies residual NULL rows before policy assignment
 - returns exit `6` for persisted/partial-success conditions after a relevant COMMIT
 - keeps batch writes sequential
