@@ -2,6 +2,23 @@
 
 All notable changes to `cm-retention` are documented here.
 
+## 0.4.2
+
+Independent batch-verification and audit hardening:
+
+- every `assign --file` / `unassign --file` invocation now gets a timestamped audit log under `<application-home>/logs` by default
+- `CM_RETENTION_LOG_DIR` can override the audit-log directory; the launcher creates the directory/log with restrictive permissions and never writes credentials
+- after any real batch reaches Phase 2, the launcher starts `BatchVerifyMain` in a **second JVM with a fresh IBM CM session** so the final check cannot reuse mutation-session/cache state
+- the independent verifier rereads every exact ItemType from the original file and checks the requested end state (`unassign` => no policy, `assign` => exact target policy)
+- final verification also runs after a batch stops part-way through, giving an explicit view of which requested ItemTypes still differ from the target state
+- confirmed state mismatches are printed with expected/actual policy and written to a generated `*-retry.txt`
+- retry files contain only confirmed mismatches; ItemTypes whose SDK read fails are reported as state-unknown and deliberately excluded from automatic retry input
+- a mutation batch that otherwise returns success but fails independent final verification is promoted to exit code `6`
+- true mutation/runtime failures retain their original exit code; the independent verifier is diagnostic and does not mask the primary failure
+- dry-runs, validation-only failures, and interactive cancellations before Phase 2 are logged but do not run the final verifier
+- self-test now covers final-verifier policy-state comparison semantics
+- bumped runtime/package version to `0.4.2`
+
 ## 0.4.1
 
 Verified-warning batch hardening for IBM CM 8.7 legacy metadata cases:
