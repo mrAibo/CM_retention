@@ -41,7 +41,7 @@ The expiration/retention semantics are identical; only the automatic-delete sche
 - create fixed-time `AUTO_DELETE` policies
 - create policies from reusable `.properties` templates
 - assign and unassign policies
-- process many ItemTypes with `--file` in one JVM
+- process many ItemTypes with `--file` or a comma-separated inline list in one JVM
 - use a comma-separated ItemType list as a compact batch shortcut
 - preview writes with `--dry-run`
 - guarded existing-item `--backfill` before assignment
@@ -456,6 +456,15 @@ bin/cm-retention unassign ITEMTYPE1,ITEMTYPE2 --yes
 The comma form is normalized by the launcher into the same protected batch workflow as `--file`; it is not a separate mutation implementation. Therefore it receives the same Phase-1 validation, sequential/fail-fast writes, verified-warning handling, audit log, independent Phase-3 verifier and retry file. Empty or duplicate entries are rejected. When whitespace around commas is desired, quote the ItemType-list argument so the shell passes it as one argument.
 
 The complete mutation phase runs in one JVM. With backfill, one JDBC connection is reused across the batch. Phase 1 validates every ItemType before the first mutation. Phase 2 remains sequential and non-atomic.
+
+Starting with 0.4.4, a comma-separated first ItemType argument is normalized into the same protected batch path:
+
+```bash
+bin/cm-retention assign ITEM1,ITEM2,ITEM3 AUTO_DELETE_1Y --backfill --yes
+bin/cm-retention unassign ITEM1,ITEM2,ITEM3 --yes
+```
+
+If spaces are used around commas, quote the whole list: `"ITEM1, ITEM2, ITEM3"`. Empty entries and duplicates are rejected. The launcher prints the recognized inline batch count before execution.
 
 ## Verified secondary IBM CM warnings in 0.4.1
 
