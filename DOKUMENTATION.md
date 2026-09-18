@@ -1,4 +1,4 @@
-# cm-retention 0.4.2 – Betriebs- und Benutzerdokumentation
+# cm-retention 0.4.4 – Betriebs- und Benutzerdokumentation
 
 ## 1. Zweck
 
@@ -89,7 +89,7 @@ bin/cm-retention selftest
 Erwartet:
 
 ```text
-cm-retention 0.4.2
+cm-retention 0.4.4
 Self-test: OK (... checks)
 ```
 
@@ -305,6 +305,8 @@ ICM$AUTODELETEDATE = CREATETS + 1 YEAR
 
 Für die Plan-Berechnung wird `CURRENT TIMESTAMP` verwendet. Der fail-fast Probe nutzt `FETCH FIRST 1 ROW ONLY`.
 
+Seit 0.4.3 werden große DB2-Backfills in begrenzte UPDATE/COMMIT-Chunks zerlegt, um `SQLCODE=-964` durch eine einzelne sehr große Transaktion zu vermeiden. Seit 0.4.4 prüft der Chunker nach dem Hauptlauf erneut auf während des Backfills neu entstandene Rows und führt bis zu 20 begrenzte Catch-up-Pässe aus. Die Policy wird erst zugewiesen, wenn keine residualen NULL-Rows mehr vorhanden sind; bei dauerhaft hoher Schreiblast oder `CREATETS=NULL` bleibt der Lauf fail-closed mit Exit 6.
+
 ### 7.2 Oracle-Dialekt
 
 Der Oracle-Dialekt verwendet Interval-Literale. Beispiel ein Jahr:
@@ -517,6 +519,16 @@ bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --yes
 bin/cm-retention assign --file itemtypes.txt AUTO_DELETE_1Y --backfill --yes
 ```
 
+Ab 0.4.4 kann dieselbe Batch-Engine auch direkt über eine Komma-Liste aufgerufen werden:
+
+```bash
+bin/cm-retention assign ITEM1,ITEM2,ITEM3 AUTO_DELETE_1Y --yes
+bin/cm-retention assign ITEM1,ITEM2,ITEM3 AUTO_DELETE_1Y --backfill --yes
+bin/cm-retention unassign ITEM1,ITEM2,ITEM3 --yes
+```
+
+Leerzeichen innerhalb der Liste werden getrimmt, wenn die komplette Liste als ein Shell-Argument übergeben wird, z. B. `"ITEM1, ITEM2, ITEM3"`. Leere Einträge und doppelte ItemTypes werden abgelehnt. Die Komma-Syntax wird intern in denselben geschützten `--file`-Workflow normalisiert und erhält deshalb dieselbe Phase-1-Validierung, sequenzielle Mutation, Audit-Protokollierung, Final-Verifikation und Retry-Datei.
+
 Die Mutationsphase läuft in einem JVM-Prozess. Bei Backfill wird eine direkte JDBC-Verbindung über den Batch wiederverwendet. Phase 1 validiert alle ItemTypes vor dem ersten Write.
 
 Phase 2 bleibt:
@@ -637,16 +649,16 @@ Auf einem CM-8.7-Host mit echter `cmbicmsdk81.jar`:
 
 Der Build führt `SelfTestMain` vor dem Packaging aus.
 
-0.4.2 erzeugt:
+0.4.4 erzeugt:
 
 ```text
 build/cm-retention.jar
-build/cm-retention-0.4.2.jar
+build/cm-retention-0.4.4.jar
 build/.version
 build/ret-policy.properties
 build/profiles/*.properties
-build/cm-retention-0.4.2-runtime.tar.gz
-build/SHA256SUMS-0.4.2
+build/cm-retention-0.4.4-runtime.tar.gz
+build/SHA256SUMS-0.4.4
 ```
 
 Das Runtime-Paket enthält keine IBM-SDK-/DB2-/Oracle-JARs und keine Credentials.
@@ -654,8 +666,8 @@ Das Runtime-Paket enthält keine IBM-SDK-/DB2-/Oracle-JARs und keine Credentials
 ## 11. Installation ohne Git
 
 ```bash
-tar -xzf cm-retention-0.4.2-runtime.tar.gz
-cd cm-retention-0.4.2
+tar -xzf cm-retention-0.4.4-runtime.tar.gz
+cd cm-retention-0.4.4
 cp .env.example .env
 chmod 600 .env
 vi .env
