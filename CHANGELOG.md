@@ -4,6 +4,10 @@ All notable changes to `cm-retention` are documented here.
 
 ## 0.4.4
 
+- Add comma-separated inline ItemType batches for assign/unassign; they reuse the existing audited `--file` workflow.
+- Add bounded DB2 catch-up passes for rows created during long backfills.
+- Harden inline parsing, SQL schema validation, and JDBC close diagnostics.
+
 Inline-batch convenience and concurrent-write backfill hardening after production validation on an active multi-million-row ItemType:
 
 - `assign ITEM1,ITEM2,... POLICY` and `unassign ITEM1,ITEM2,...` are now accepted as compact batch shortcuts
