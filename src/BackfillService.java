@@ -222,8 +222,13 @@ final class BackfillService {
         if (db == null) return;
         try {
             if (!db.isClosed()) db.close();
-        } catch (Exception ignored) {
-            // Best-effort cleanup.
+        } catch (Exception e) {
+            // Best-effort cleanup. Surface the close failure only in debug mode;
+            // cleanup must not mask the primary operation result.
+            if (Boolean.parseBoolean(System.getenv("CM_DEBUG"))) {
+                System.err.println("DEBUG: JDBC close failed: " + e.getMessage());
+                e.printStackTrace(System.err);
+            }
         }
     }
 
@@ -360,6 +365,11 @@ final class BackfillService {
     }
 
     private String qualified(String tableName) {
+        // Defense in depth: BackfillConfig validates the immutable schema at
+        // construction time, but validate again at the SQL composition boundary.
+        if (config.schema == null || !config.schema.matches("[A-Z][A-Z0-9_$#]*")) {
+            throw new CliException("Unsafe backfill schema: " + config.schema, 5);
+        }
         if (!tableName.matches("ICMUT[0-9]+")) {
             throw new CliException("Unsafe root table name: " + tableName, 5);
         }
